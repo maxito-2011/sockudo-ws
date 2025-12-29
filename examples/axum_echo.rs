@@ -8,12 +8,12 @@
 use std::net::SocketAddr;
 
 use axum::{
-    Router,
     body::Body,
     extract::Request,
-    http::{Response, StatusCode, header},
+    http::{header, Response, StatusCode},
     response::IntoResponse,
     routing::get,
+    Router,
 };
 use futures_util::{SinkExt, StreamExt};
 use hyper_util::rt::TokioIo;
