@@ -72,8 +72,9 @@ impl<T, const N: usize> SpscQueue<T, N> {
     const ASSERT_POWER_OF_TWO: () = assert!(N.is_power_of_two(), "N must be power of 2");
 
     /// Create a new empty queue
+    #[allow(path_statements)]
     pub const fn new() -> Self {
-        let _ = Self::ASSERT_POWER_OF_TWO;
+        Self::ASSERT_POWER_OF_TWO;
         Self {
             head: CacheAlignedAtomic::new(0),
             tail: CacheAlignedAtomic::new(0),
@@ -195,11 +196,12 @@ impl<T, const N: usize> MpmcQueue<T, N> {
     const ASSERT_POWER_OF_TWO: () = assert!(N.is_power_of_two(), "N must be power of 2");
 
     /// Create a new empty queue
+    #[allow(path_statements)]
     pub fn new() -> Self {
-        let _ = Self::ASSERT_POWER_OF_TWO;
+        Self::ASSERT_POWER_OF_TWO;
 
         // Initialize sequences to their index positions
-        let sequences: [AtomicUsize; N] = std::array::from_fn(|i| AtomicUsize::new(i));
+        let sequences: [AtomicUsize; N] = std::array::from_fn(AtomicUsize::new);
 
         Self {
             head: CacheAlignedAtomic::new(0),

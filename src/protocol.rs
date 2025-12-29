@@ -355,7 +355,7 @@ impl Protocol {
             let code = u16::from_be_bytes([frame.payload[0], frame.payload[1]]);
 
             // Validate close code
-            if !CloseReason::is_valid_code(code) && !(code >= 3000 && code <= 4999) {
+            if !CloseReason::is_valid_code(code) && !(3000..=4999).contains(&code) {
                 return Err(Error::InvalidCloseCode(code));
             }
 
@@ -564,12 +564,10 @@ impl CompressedProtocol {
                         if DEBUG {
                             eprintln!("[PROTOCOL] Added message to output");
                         }
-                    } else {
-                        if DEBUG {
-                            eprintln!(
-                                "[PROTOCOL] No message from handle_frame (fragment or control)"
-                            );
-                        }
+                    } else if DEBUG {
+                        eprintln!(
+                            "[PROTOCOL] No message from handle_frame (fragment or control)"
+                        );
                     }
                 }
                 None => {

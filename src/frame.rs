@@ -325,7 +325,7 @@ impl FrameParser {
     pub fn parse(&mut self, buf: &mut BytesMut) -> Result<Option<Frame>> {
         const DEBUG: bool = false;
         loop {
-            if DEBUG && buf.len() > 0 {
+            if DEBUG && !buf.is_empty() {
                 eprintln!(
                     "[PARSER] State: {:?}, buf_len: {}, header_len: {}",
                     self.state,
@@ -630,7 +630,7 @@ impl FrameParser {
                             header.fin,
                             header.rsv1
                         );
-                        if buf.len() > 0 {
+                        if !buf.is_empty() {
                             eprintln!(
                                 "[PARSER] First 16 bytes of buffer: {:?}",
                                 &buf[..buf.len().min(16)]

@@ -110,13 +110,13 @@ async fn run_benchmark(
 
         match parse_response(&buf) {
             Ok(Some((res, consumed))) => {
-                if let Some(accept) = res.accept {
-                    if !validate_accept_key(&key, accept) {
-                        return Err(std::io::Error::new(
-                            std::io::ErrorKind::InvalidData,
-                            "Invalid accept key",
-                        ));
-                    }
+                if let Some(accept) = res.accept
+                    && !validate_accept_key(&key, accept)
+                {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "Invalid accept key",
+                    ));
                 }
                 // Keep leftover data
                 let _ = buf.split_to(consumed);
@@ -140,7 +140,6 @@ async fn run_benchmark(
     let mut protocol = Protocol::new(Role::Client, config.max_frame_size, config.max_message_size);
     let mut write_buf = BytesMut::with_capacity(64 * 1024);
 
-    let mut messages_sent = 0;
     let mut messages_received = 0;
     let mut bytes_transferred = 0;
 
@@ -199,8 +198,7 @@ async fn run_benchmark(
     }
 
     // Wait for writer
-    messages_sent = writer_handle.await.unwrap()?;
-    let _ = messages_sent; // Silence warning
+    let _ = writer_handle.await.unwrap()?;
 
     Ok(BenchStats {
         messages: messages_received,

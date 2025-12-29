@@ -177,7 +177,6 @@ async fn handle_connection_plain(
     let mut protocol = Protocol::new(Role::Server, config.max_frame_size, config.max_message_size);
     let mut write_buf = BytesMut::with_capacity(128 * 1024);
     let mut messages = Vec::with_capacity(8);
-    let mut close_sent = false;
 
     loop {
         // Process frames one at a time, flushing responses between frames
@@ -216,10 +215,7 @@ async fn handle_connection_plain(
                 }
                 Message::Pong(_) => {}
                 Message::Close(reason) => {
-                    if !close_sent {
-                        protocol.encode_message(&Message::Close(reason), &mut write_buf)?;
-                        close_sent = true;
-                    }
+                    protocol.encode_message(&Message::Close(reason), &mut write_buf)?;
                     if !write_buf.is_empty() {
                         stream.write_all(&write_buf).await?;
                         stream.flush().await?;
@@ -260,7 +256,6 @@ async fn handle_connection_compressed(
     );
     let mut write_buf = BytesMut::with_capacity(128 * 1024);
     let mut messages = Vec::with_capacity(8);
-    let mut close_sent = false;
 
     loop {
         if DEBUG {
@@ -315,26 +310,23 @@ async fn handle_connection_compressed(
                     if DEBUG {
                         println!("Received close frame, reason: {:?}", reason);
                     }
-                    if !close_sent {
-                        // Close frames are not compressed
-                        protocol.encode_pong(&[], &mut write_buf); // dummy to get inner
-                        write_buf.clear();
-                        // Encode close manually without compression
-                        use bytes::Bytes;
-                        use sockudo_ws::frame::{OpCode, encode_frame};
-                        let payload = if let Some(ref r) = reason {
-                            let mut p = BytesMut::with_capacity(2 + r.reason.len());
-                            p.extend_from_slice(&r.code.to_be_bytes());
-                            p.extend_from_slice(r.reason.as_bytes());
-                            p.freeze()
-                        } else {
-                            Bytes::new()
-                        };
-                        encode_frame(&mut write_buf, OpCode::Close, &payload, true, None);
-                        close_sent = true;
-                        if DEBUG {
-                            println!("Sending close frame response");
-                        }
+                    // Close frames are not compressed
+                    protocol.encode_pong(&[], &mut write_buf); // dummy to get inner
+                    write_buf.clear();
+                    // Encode close manually without compression
+                    use bytes::Bytes;
+                    use sockudo_ws::frame::{OpCode, encode_frame};
+                    let payload = if let Some(ref r) = reason {
+                        let mut p = BytesMut::with_capacity(2 + r.reason.len());
+                        p.extend_from_slice(&r.code.to_be_bytes());
+                        p.extend_from_slice(r.reason.as_bytes());
+                        p.freeze()
+                    } else {
+                        Bytes::new()
+                    };
+                    encode_frame(&mut write_buf, OpCode::Close, &payload, true, None);
+                    if DEBUG {
+                        println!("Sending close frame response");
                     }
                     if !write_buf.is_empty() {
                         stream.write_all(&write_buf).await?;

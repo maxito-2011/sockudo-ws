@@ -10,7 +10,7 @@ mod fast_rng {
     use std::cell::Cell;
 
     thread_local! {
-        static RNG_STATE: Cell<u64> = Cell::new(0);
+        static RNG_STATE: Cell<u64> = const { Cell::new(0) };
     }
 
     /// Generate a random mask using xorshift64

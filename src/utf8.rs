@@ -124,7 +124,7 @@ fn validate_utf8_scalar(data: &[u8]) -> bool {
                 | ((b1 as u32 & 0x3F) << 12)
                 | ((b2 as u32 & 0x3F) << 6)
                 | (b3 as u32 & 0x3F);
-            if cp < 0x10000 || cp > 0x10FFFF {
+            if !(0x10000..=0x10FFFF).contains(&cp) {
                 return false;
             }
             i += 4;
@@ -364,7 +364,7 @@ pub fn validate_utf8_incomplete(data: &[u8]) -> (bool, usize) {
                 | ((b1 as u32 & 0x3F) << 12)
                 | ((b2 as u32 & 0x3F) << 6)
                 | (b3 as u32 & 0x3F);
-            if cp < 0x10000 || cp > 0x10FFFF {
+            if !(0x10000..=0x10FFFF).contains(&cp) {
                 return (false, 0);
             }
             i += 4;

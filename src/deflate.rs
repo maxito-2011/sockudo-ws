@@ -105,7 +105,7 @@ impl DeflateConfig {
                         let bits: u8 = v.parse().map_err(|_| {
                             Error::HandshakeFailed("invalid server_max_window_bits value")
                         })?;
-                        if bits < MIN_WINDOW_BITS || bits > MAX_WINDOW_BITS {
+                        if !(MIN_WINDOW_BITS..=MAX_WINDOW_BITS).contains(&bits) {
                             return Err(Error::HandshakeFailed(
                                 "server_max_window_bits out of range (8-15)",
                             ));
@@ -118,7 +118,7 @@ impl DeflateConfig {
                         let bits: u8 = v.parse().map_err(|_| {
                             Error::HandshakeFailed("invalid client_max_window_bits value")
                         })?;
-                        if bits < MIN_WINDOW_BITS || bits > MAX_WINDOW_BITS {
+                        if !(MIN_WINDOW_BITS..=MAX_WINDOW_BITS).contains(&bits) {
                             return Err(Error::HandshakeFailed(
                                 "client_max_window_bits out of range (8-15)",
                             ));

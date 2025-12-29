@@ -233,7 +233,7 @@ impl Arena {
     /// Allocate and copy a slice
     #[inline]
     pub fn alloc_slice_copy<T: Copy>(&mut self, slice: &[T]) -> Option<&mut [T]> {
-        let ptr = self.alloc_bytes(size_of::<T>() * slice.len(), align_of::<T>())?;
+        let ptr = self.alloc_bytes(std::mem::size_of_val(slice), align_of::<T>())?;
         let dest = unsafe { std::slice::from_raw_parts_mut(ptr.as_ptr() as *mut T, slice.len()) };
         dest.copy_from_slice(slice);
         Some(dest)

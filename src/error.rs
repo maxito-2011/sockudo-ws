@@ -154,7 +154,7 @@ impl From<Error> for io::Error {
             Error::ConnectionClosed => {
                 io::Error::new(io::ErrorKind::BrokenPipe, "connection closed")
             }
-            other => io::Error::new(io::ErrorKind::Other, other.to_string()),
+            other => io::Error::other(other.to_string()),
         }
     }
 }

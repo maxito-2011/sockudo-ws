@@ -217,12 +217,16 @@ impl IntoResponse for WebSocketUpgradeRejection {
     }
 }
 
+/// Handler type for WebSocket upgrade
+type UpgradeHandler =
+    Box<dyn FnOnce(UpgradedStream) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send>;
+
 /// Response that performs the WebSocket upgrade
 pub struct WebSocketUpgradeResponse {
     accept_key: String,
     protocol: Option<String>,
     config: Config,
-    handler: Box<dyn FnOnce(UpgradedStream) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send>,
+    handler: UpgradeHandler,
 }
 
 impl IntoResponse for WebSocketUpgradeResponse {
@@ -239,13 +243,12 @@ impl IntoResponse for WebSocketUpgradeResponse {
         }
 
         // Use hyper's upgrade mechanism
-        let response = builder.body(Body::empty()).unwrap();
 
         // Spawn the handler to run after the upgrade completes
         // Note: In a real implementation, we'd use hyper's upgrade() here
         // For now, we return the response and expect the handler to be called separately
 
-        response
+        builder.body(Body::empty()).unwrap()
     }
 }
 
