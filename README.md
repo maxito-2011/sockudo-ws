@@ -289,4 +289,3 @@ MIT
 ## Credits
 
 - Inspired by [uWebSockets](https://github.com/uNetworking/uWebSockets)
-- Used in [Sockudo](https://github.com/RustNSparks/sockudo)
