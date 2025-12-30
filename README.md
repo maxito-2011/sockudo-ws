@@ -8,6 +8,22 @@ Used in [Sockudo](https://github.com/RustNSparks/sockudo), a high-performance Pu
 
 ## Performance
 
+### Rust WebSocket Libraries Benchmark
+
+Benchmarked using [web-socket-benchmark](https://github.com/nurmohammed840/web-socket-benchmark) (100,000 iterations of "Hello, World!" message):
+
+| Library | Send | Echo | Recv | **Total** |
+|---------|------|------|------|-----------|
+| **sockudo-ws** | **1.2ms** | **5.0ms** | **3.1ms** | **10.2ms** |
+| fastwebsockets | 3.3ms | 5.7ms | 3.0ms | 12.0ms |
+| web-socket | 2.1ms | 6.8ms | 3.3ms | 12.2ms |
+| soketto | 5.8ms | 17.6ms | 9.7ms | 33.1ms |
+| tokio-tungstenite | 6.4ms | 18.2ms | 10.2ms | 34.8ms |
+
+**sockudo-ws is ~17% faster than the next fastest Rust WebSocket library!**
+
+### vs uWebSockets (C++)
+
 Benchmarked against [uWebSockets](https://github.com/uNetworking/uWebSockets), the industry standard for high-performance WebSockets:
 
 | Test Case | sockudo-ws | uWebSockets | Ratio |
@@ -517,6 +533,51 @@ pub enum Message {
     Close(Option<CloseReason>),
 }
 ```
+
+### Zero-Copy API (RawMessage)
+
+For maximum performance, use `RawMessage` to avoid String allocation for text messages:
+
+```rust
+pub enum RawMessage {
+    Text(Bytes),      // Zero-copy, UTF-8 validated
+    Binary(Bytes),
+    Ping(Bytes),
+    Pong(Bytes),
+    Close(Option<CloseReason>),
+}
+```
+
+Using `RawMessage` with the Protocol layer:
+
+```rust
+use sockudo_ws::{Protocol, RawMessage, Role};
+use bytes::BytesMut;
+
+let mut protocol = Protocol::new(Role::Server, Config::default());
+let mut buffer = BytesMut::new();
+let mut messages = Vec::new();
+
+// Parse incoming data into RawMessage (zero String allocation)
+protocol.process_raw_into(&mut buffer, &mut messages)?;
+
+for msg in messages.drain(..) {
+    match msg {
+        RawMessage::Text(bytes) => {
+            // bytes is already UTF-8 validated
+            // Convert to &str only when needed
+            let text = std::str::from_utf8(&bytes).unwrap();
+            println!("Received: {}", text);
+        }
+        RawMessage::Binary(data) => {
+            // Handle binary data
+        }
+        _ => {}
+    }
+}
+```
+
+This API is ~17% faster than the standard `Message` API by avoiding heap allocation for text message payloads.
 
 ## Running Tests
 

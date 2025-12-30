@@ -322,7 +322,65 @@ impl FrameParser {
     /// - Ok(Some(frame)) if a complete frame was parsed
     /// - Ok(None) if more data is needed
     /// - Err(e) if parsing failed
+    #[inline]
     pub fn parse(&mut self, buf: &mut BytesMut) -> Result<Option<Frame>> {
+        // Ultra-fast path for small unmasked frames (server->client)
+        // This handles the common case without any state machine overhead
+        if self.state == ParseState::Header && !self.expect_masked && buf.len() >= 2 {
+            let b0 = buf[0];
+            let b1 = buf[1];
+            let len_byte = b1 & 0x7F;
+
+            // Check: small frame, not masked, no extended length
+            if len_byte <= 125 && (b1 & 0x80) == 0 {
+                let payload_len = len_byte as usize;
+                let total_len = 2 + payload_len;
+
+                if buf.len() >= total_len {
+                    // We have a complete small frame - parse it inline
+                    let fin = b0 & 0x80 != 0;
+                    let rsv1 = b0 & 0x40 != 0;
+                    let rsv2 = b0 & 0x20 != 0;
+                    let rsv3 = b0 & 0x10 != 0;
+
+                    // Quick RSV validation
+                    if (rsv1 && !self.allow_rsv1) || rsv2 || rsv3 {
+                        return self.parse_slow(buf);
+                    }
+
+                    if let Some(opcode) = OpCode::from_u8(b0 & 0x0F) {
+                        // Control frame fragmentation check
+                        if opcode.is_control() && !fin {
+                            return Err(Error::Protocol("control frame must not be fragmented"));
+                        }
+
+                        // Extract payload
+                        buf.advance(2);
+                        let payload = buf.split_to(payload_len).freeze();
+
+                        return Ok(Some(Frame {
+                            header: FrameHeader {
+                                fin,
+                                rsv1,
+                                rsv2,
+                                rsv3,
+                                opcode,
+                                masked: false,
+                                payload_len: payload_len as u64,
+                                mask: None,
+                            },
+                            payload,
+                        }));
+                    }
+                }
+            }
+        }
+
+        self.parse_slow(buf)
+    }
+
+    /// Slow path for frame parsing - handles all edge cases
+    fn parse_slow(&mut self, buf: &mut BytesMut) -> Result<Option<Frame>> {
         const DEBUG: bool = false;
         loop {
             if DEBUG && !buf.is_empty() {
@@ -732,6 +790,7 @@ pub fn encode_frame(
 /// Encode a frame with RSV1 bit control (for compression)
 ///
 /// When `rsv1` is true, sets the RSV1 bit indicating compressed data.
+#[inline]
 pub fn encode_frame_with_rsv(
     buf: &mut BytesMut,
     opcode: OpCode,
@@ -742,51 +801,109 @@ pub fn encode_frame_with_rsv(
 ) {
     let payload_len = payload.len();
 
+    // Calculate header size
+    let ext_len_size = if payload_len > MEDIUM_MESSAGE_THRESHOLD {
+        8
+    } else if payload_len > SMALL_MESSAGE_THRESHOLD {
+        2
+    } else {
+        0
+    };
+    let mask_size = if mask.is_some() { 4 } else { 0 };
+    let header_size = 2 + ext_len_size + mask_size;
+    let total_size = header_size + payload_len;
+
     // Reserve space for header + payload
-    let header_size =
-        2 + if payload_len > MEDIUM_MESSAGE_THRESHOLD {
-            8
-        } else if payload_len > SMALL_MESSAGE_THRESHOLD {
-            2
+    buf.reserve(total_size);
+
+    // SAFETY: We just reserved enough space, and we'll set the length after writing
+    unsafe {
+        let base = buf.as_mut_ptr().add(buf.len());
+        let mut offset = 0;
+
+        // First byte: FIN + RSV1 + opcode
+        let mut b0 = opcode as u8;
+        if fin {
+            b0 |= 0x80;
+        }
+        if rsv1 {
+            b0 |= 0x40;
+        }
+        base.add(offset).write(b0);
+        offset += 1;
+
+        // Second byte: mask flag + length
+        let mask_bit = if mask.is_some() { 0x80u8 } else { 0x00u8 };
+
+        if payload_len <= SMALL_MESSAGE_THRESHOLD {
+            base.add(offset).write(mask_bit | payload_len as u8);
+            offset += 1;
+        } else if payload_len <= MEDIUM_MESSAGE_THRESHOLD {
+            base.add(offset).write(mask_bit | 126);
+            offset += 1;
+            let len_bytes = (payload_len as u16).to_be_bytes();
+            std::ptr::copy_nonoverlapping(len_bytes.as_ptr(), base.add(offset), 2);
+            offset += 2;
         } else {
-            0
-        } + if mask.is_some() { 4 } else { 0 };
+            base.add(offset).write(mask_bit | 127);
+            offset += 1;
+            let len_bytes = (payload_len as u64).to_be_bytes();
+            std::ptr::copy_nonoverlapping(len_bytes.as_ptr(), base.add(offset), 8);
+            offset += 8;
+        }
 
-    buf.reserve(header_size + payload_len);
+        // Mask and payload
+        if let Some(m) = mask {
+            // Write mask
+            std::ptr::copy_nonoverlapping(m.as_ptr(), base.add(offset), 4);
+            offset += 4;
 
-    // First byte: FIN + RSV1 + opcode
-    let mut b0 = opcode as u8;
-    if fin {
-        b0 |= 0x80;
+            // Copy and mask payload in a single pass
+            let payload_dst = base.add(offset);
+            encode_payload_masked_inline(payload_dst, payload.as_ptr(), payload_len, m);
+        } else {
+            // Fast path: just copy payload
+            std::ptr::copy_nonoverlapping(payload.as_ptr(), base.add(offset), payload_len);
+        }
+
+        // Update buffer length
+        buf.set_len(buf.len() + total_size);
     }
-    if rsv1 {
-        b0 |= 0x40;
-    }
-    buf.put_u8(b0);
+}
 
-    // Second byte: mask flag + length
-    let mask_bit = if mask.is_some() { 0x80 } else { 0x00 };
+/// Inline masking during copy - single pass for masked frames
+///
+/// SAFETY: Caller must ensure dst has at least `len` bytes available
+#[inline]
+unsafe fn encode_payload_masked_inline(dst: *mut u8, src: *const u8, len: usize, mask: [u8; 4]) {
+    unsafe {
+        let mask_u32 = u32::from_ne_bytes(mask);
 
-    if payload_len <= SMALL_MESSAGE_THRESHOLD {
-        buf.put_u8(mask_bit | payload_len as u8);
-    } else if payload_len <= MEDIUM_MESSAGE_THRESHOLD {
-        buf.put_u8(mask_bit | 126);
-        buf.put_u16(payload_len as u16);
-    } else {
-        buf.put_u8(mask_bit | 127);
-        buf.put_u64(payload_len as u64);
-    }
+        // Process 8 bytes at a time for better throughput
+        let mut i = 0;
 
-    // Mask
-    if let Some(m) = mask {
-        buf.put_slice(&m);
+        // Process 8-byte chunks
+        while i + 8 <= len {
+            let mask_u64 = ((mask_u32 as u64) << 32) | (mask_u32 as u64);
+            let src_val = std::ptr::read_unaligned(src.add(i) as *const u64);
+            let masked = src_val ^ mask_u64;
+            std::ptr::write_unaligned(dst.add(i) as *mut u64, masked);
+            i += 8;
+        }
 
-        // Copy and mask payload
-        let start = buf.len();
-        buf.put_slice(payload);
-        apply_mask(&mut buf[start..], m);
-    } else {
-        buf.put_slice(payload);
+        // Process 4-byte chunk if remaining
+        if i + 4 <= len {
+            let src_val = std::ptr::read_unaligned(src.add(i) as *const u32);
+            let masked = src_val ^ mask_u32;
+            std::ptr::write_unaligned(dst.add(i) as *mut u32, masked);
+            i += 4;
+        }
+
+        // Process remaining bytes
+        while i < len {
+            dst.add(i).write(src.add(i).read() ^ mask[i & 3]);
+            i += 1;
+        }
     }
 }
 

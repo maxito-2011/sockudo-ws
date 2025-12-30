@@ -59,7 +59,7 @@ pub mod io_uring;
 
 pub use error::{Error, Result};
 pub use frame::{Frame, OpCode};
-pub use protocol::{Message, Role};
+pub use protocol::{Message, RawMessage, Role};
 pub use stream::{ReuniteError, SplitReader, SplitWriter, WebSocketStream, reunite};
 
 // Re-export config types at top level for convenience
