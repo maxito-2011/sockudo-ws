@@ -38,11 +38,23 @@ use crate::cork::CorkBuffer;
 use crate::error::{CloseReason, Error, Result};
 use crate::protocol::{Message, Protocol, Role};
 
+/// Default high water mark for backpressure (64KB)
+const DEFAULT_HIGH_WATER_MARK: usize = 64 * 1024;
+
+/// Default low water mark for backpressure (16KB)
+const DEFAULT_LOW_WATER_MARK: usize = 16 * 1024;
+
 pin_project! {
     /// A WebSocket stream over an async transport
     ///
     /// This type implements both `Stream<Item = Result<Message>>` for receiving
     /// and `Sink<Message>` for sending messages.
+    ///
+    /// # Backpressure
+    ///
+    /// The stream supports backpressure monitoring through `is_backpressured()` and
+    /// `write_buffer_len()` methods. When the write buffer exceeds the high water mark,
+    /// producers should pause sending until the buffer drains below the low water mark.
     ///
     /// # Example
     ///
@@ -54,6 +66,10 @@ pin_project! {
     ///     while let Some(msg) = ws.next().await {
     ///         match msg {
     ///             Ok(Message::Text(text)) => {
+    ///                 // Check backpressure before sending
+    ///                 if ws.is_backpressured() {
+    ///                     ws.flush().await?;
+    ///                 }
     ///                 ws.send(Message::Text(text)).await?;
     ///             }
     ///             Ok(Message::Close(_)) => break,
@@ -73,6 +89,9 @@ pin_project! {
         // Pending messages from last process() call
         pending_messages: Vec<Message>,
         pending_index: usize,
+        // Backpressure thresholds
+        high_water_mark: usize,
+        low_water_mark: usize,
     }
 }
 
@@ -105,6 +124,8 @@ where
             config,
             pending_messages: Vec::new(),
             pending_index: 0,
+            high_water_mark: DEFAULT_HIGH_WATER_MARK,
+            low_water_mark: DEFAULT_LOW_WATER_MARK,
         }
     }
 
@@ -136,6 +157,84 @@ where
     /// Check if the connection is closed
     pub fn is_closed(&self) -> bool {
         self.state == StreamState::Closed
+    }
+
+    // ========================================================================
+    // Backpressure API
+    // ========================================================================
+
+    /// Check if the write buffer is backpressured
+    ///
+    /// Returns `true` when the write buffer has exceeded the high water mark.
+    /// Producers should pause sending new messages until `is_write_buffer_low()`
+    /// returns `true` or until the buffer is flushed.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// if ws.is_backpressured() {
+    ///     // Wait for buffer to drain before sending more
+    ///     ws.flush().await?;
+    /// }
+    /// ```
+    #[inline]
+    pub fn is_backpressured(&self) -> bool {
+        self.write_buf.pending_bytes() > self.high_water_mark
+    }
+
+    /// Check if the write buffer is below the low water mark
+    ///
+    /// Returns `true` when the write buffer has drained below the low water mark.
+    /// This can be used to resume sending after backpressure was detected.
+    #[inline]
+    pub fn is_write_buffer_low(&self) -> bool {
+        self.write_buf.pending_bytes() <= self.low_water_mark
+    }
+
+    /// Get the current write buffer size in bytes
+    ///
+    /// Useful for monitoring and debugging backpressure issues.
+    #[inline]
+    pub fn write_buffer_len(&self) -> usize {
+        self.write_buf.pending_bytes()
+    }
+
+    /// Get the current read buffer size in bytes
+    ///
+    /// Useful for monitoring memory usage and debugging.
+    #[inline]
+    pub fn read_buffer_len(&self) -> usize {
+        self.read_buf.len()
+    }
+
+    /// Set the high water mark for backpressure
+    ///
+    /// When the write buffer exceeds this threshold, `is_backpressured()` returns `true`.
+    /// Default is 64KB.
+    #[inline]
+    pub fn set_high_water_mark(&mut self, size: usize) {
+        self.high_water_mark = size;
+    }
+
+    /// Set the low water mark for backpressure
+    ///
+    /// When the write buffer drops below this threshold, `is_write_buffer_low()` returns `true`.
+    /// Default is 16KB.
+    #[inline]
+    pub fn set_low_water_mark(&mut self, size: usize) {
+        self.low_water_mark = size;
+    }
+
+    /// Get the current high water mark
+    #[inline]
+    pub fn high_water_mark(&self) -> usize {
+        self.high_water_mark
+    }
+
+    /// Get the current low water mark
+    #[inline]
+    pub fn low_water_mark(&self) -> usize {
+        self.low_water_mark
     }
 
     /// Send a close frame
@@ -418,6 +517,8 @@ where
 pub struct WebSocketStreamBuilder {
     config: Config,
     role: Role,
+    high_water_mark: usize,
+    low_water_mark: usize,
 }
 
 impl WebSocketStreamBuilder {
@@ -426,6 +527,8 @@ impl WebSocketStreamBuilder {
         Self {
             config: Config::default(),
             role: Role::Server,
+            high_water_mark: DEFAULT_HIGH_WATER_MARK,
+            low_water_mark: DEFAULT_LOW_WATER_MARK,
         }
     }
 
@@ -453,12 +556,33 @@ impl WebSocketStreamBuilder {
         self
     }
 
+    /// Set the high water mark for backpressure
+    ///
+    /// When the write buffer exceeds this threshold, `is_backpressured()` returns `true`.
+    /// Default is 64KB.
+    pub fn high_water_mark(mut self, size: usize) -> Self {
+        self.high_water_mark = size;
+        self
+    }
+
+    /// Set the low water mark for backpressure
+    ///
+    /// When the write buffer drops below this threshold, `is_write_buffer_low()` returns `true`.
+    /// Default is 16KB.
+    pub fn low_water_mark(mut self, size: usize) -> Self {
+        self.low_water_mark = size;
+        self
+    }
+
     /// Build the WebSocket stream
     pub fn build<S>(self, stream: S) -> WebSocketStream<S>
     where
         S: AsyncRead + AsyncWrite + Unpin,
     {
-        WebSocketStream::from_raw(stream, self.role, self.config)
+        let mut ws = WebSocketStream::from_raw(stream, self.role, self.config);
+        ws.high_water_mark = self.high_water_mark;
+        ws.low_water_mark = self.low_water_mark;
+        ws
     }
 }
 
@@ -666,8 +790,8 @@ where
     }
 
     /// Send a text message
-    pub async fn send_text(&mut self, text: String) -> Result<()> {
-        self.send(Message::Text(text)).await
+    pub async fn send_text(&mut self, text: impl Into<String>) -> Result<()> {
+        self.send(Message::text(text)).await
     }
 
     /// Send a binary message
@@ -726,6 +850,8 @@ where
         config: Config::default(),
         pending_messages: state.pending_messages,
         pending_index: state.pending_index,
+        high_water_mark: DEFAULT_HIGH_WATER_MARK,
+        low_water_mark: DEFAULT_LOW_WATER_MARK,
     })
 }
 

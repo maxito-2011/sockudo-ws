@@ -376,6 +376,62 @@ impl FrameParser {
             }
         }
 
+        // Ultra-fast path for small MASKED frames (client->server)
+        // This handles the common case of small client messages efficiently
+        if self.state == ParseState::Header && self.expect_masked && buf.len() >= 6 {
+            let b0 = buf[0];
+            let b1 = buf[1];
+            let len_byte = b1 & 0x7F;
+
+            // Check: small frame, masked, no extended length
+            if len_byte <= 125 && (b1 & 0x80) != 0 {
+                let payload_len = len_byte as usize;
+                let total_len = 2 + 4 + payload_len; // header + mask + payload
+
+                if buf.len() >= total_len {
+                    // We have a complete small masked frame - parse it inline
+                    let fin = b0 & 0x80 != 0;
+                    let rsv1 = b0 & 0x40 != 0;
+                    let rsv2 = b0 & 0x20 != 0;
+                    let rsv3 = b0 & 0x10 != 0;
+
+                    // Quick RSV validation
+                    if (rsv1 && !self.allow_rsv1) || rsv2 || rsv3 {
+                        return self.parse_slow(buf);
+                    }
+
+                    if let Some(opcode) = OpCode::from_u8(b0 & 0x0F) {
+                        // Control frame fragmentation check
+                        if opcode.is_control() && !fin {
+                            return Err(Error::Protocol("control frame must not be fragmented"));
+                        }
+
+                        // Extract mask
+                        let mask = [buf[2], buf[3], buf[4], buf[5]];
+
+                        // Extract and unmask payload
+                        buf.advance(6);
+                        let mut payload = buf.split_to(payload_len);
+                        apply_mask(&mut payload, mask);
+
+                        return Ok(Some(Frame {
+                            header: FrameHeader {
+                                fin,
+                                rsv1,
+                                rsv2,
+                                rsv3,
+                                opcode,
+                                masked: true,
+                                payload_len: payload_len as u64,
+                                mask: Some(mask),
+                            },
+                            payload: payload.freeze(),
+                        }));
+                    }
+                }
+            }
+        }
+
         self.parse_slow(buf)
     }
 

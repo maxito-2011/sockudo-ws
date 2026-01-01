@@ -19,8 +19,14 @@
 //!
 //! - Orderly TCP close (FIN) → QUIC stream FIN
 //! - RST exception → Stream error H3_REQUEST_CANCELLED (0x10c)
+//!
+//! # Timeout Support
+//!
+//! For production use, consider wrapping handshake operations with timeouts.
+//! This module provides `H3HandshakeConfig` for timeout-aware handshakes.
 
 use http::{HeaderMap, Method, Request, Response, StatusCode, Uri};
+use std::time::Duration;
 
 /// Parsed HTTP/3 WebSocket upgrade request (Extended CONNECT per RFC 9220)
 ///
@@ -243,6 +249,93 @@ fn get_header_string(headers: &HeaderMap, name: &str) -> Option<String> {
         .get(name)
         .and_then(|v| v.to_str().ok())
         .map(String::from)
+}
+
+// ============================================================================
+// Timeout Support
+// ============================================================================
+
+/// Default handshake timeout (30 seconds)
+pub const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Default QUIC connection timeout (60 seconds)
+pub const DEFAULT_CONNECTION_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Configuration for HTTP/3 WebSocket handshake with timeout support
+#[derive(Debug, Clone)]
+pub struct H3HandshakeConfig {
+    /// Timeout for the handshake operation
+    pub handshake_timeout: Duration,
+    /// Timeout for QUIC connection establishment
+    pub connection_timeout: Duration,
+    /// Required WebSocket version (typically "13")
+    pub required_version: Option<&'static str>,
+    /// Allowed origins (empty means all allowed)
+    pub allowed_origins: Vec<String>,
+}
+
+impl Default for H3HandshakeConfig {
+    fn default() -> Self {
+        Self {
+            handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
+            connection_timeout: DEFAULT_CONNECTION_TIMEOUT,
+            required_version: Some("13"),
+            allowed_origins: Vec::new(),
+        }
+    }
+}
+
+impl H3HandshakeConfig {
+    /// Create a new config with custom handshake timeout
+    pub fn with_timeout(timeout: Duration) -> Self {
+        Self {
+            handshake_timeout: timeout,
+            ..Default::default()
+        }
+    }
+
+    /// Set the QUIC connection timeout
+    pub fn connection_timeout(mut self, timeout: Duration) -> Self {
+        self.connection_timeout = timeout;
+        self
+    }
+
+    /// Set allowed origins for CORS validation
+    pub fn allowed_origins(mut self, origins: Vec<String>) -> Self {
+        self.allowed_origins = origins;
+        self
+    }
+
+    /// Validate a handshake request against this configuration
+    ///
+    /// Returns `Ok(())` if valid, or `Err(StatusCode)` with the appropriate
+    /// HTTP status code to return.
+    pub fn validate(&self, request: &H3HandshakeRequest) -> Result<(), StatusCode> {
+        // First, validate the request per RFC 9220
+        request.validate()?;
+
+        // Check WebSocket version if required
+        if let Some(required_version) = self.required_version
+            && let Some(ref version) = request.version
+            && version != required_version
+        {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+
+        // Check origin if allowed_origins is not empty
+        if !self.allowed_origins.is_empty() {
+            if let Some(ref origin) = request.origin {
+                if !self.allowed_origins.iter().any(|o| o == origin) {
+                    return Err(StatusCode::FORBIDDEN);
+                }
+            } else {
+                // No origin header when origins are required
+                return Err(StatusCode::FORBIDDEN);
+            }
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]

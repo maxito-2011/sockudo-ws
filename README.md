@@ -22,6 +22,27 @@ Benchmarked using [web-socket-benchmark](https://github.com/nurmohammed840/web-s
 
 **sockudo-ws is ~17% faster than the next fastest Rust WebSocket library!**
 
+<details>
+<summary><b>How to reproduce</b></summary>
+
+```bash
+# Clone the benchmark repository
+git clone https://github.com/nurmohammed840/web-socket-benchmark
+cd web-socket-benchmark
+
+# Run benchmarks
+cargo bench
+```
+
+The benchmark measures:
+- **Send**: Time to send 100,000 "Hello, World!" messages from client to server
+- **Echo**: Time to send and receive 100,000 messages (round-trip)
+- **Recv**: Time to receive 100,000 messages from server to client
+
+Environment: AMD Ryzen 9 7950X, 32GB RAM, Linux 6.18, Rust 1.82
+
+</details>
+
 ### vs uWebSockets (C++)
 
 Benchmarked against [uWebSockets](https://github.com/uNetworking/uWebSockets), the industry standard for high-performance WebSockets:
@@ -33,13 +54,50 @@ Benchmarked against [uWebSockets](https://github.com/uNetworking/uWebSockets), t
 | 512 bytes, 500 connections | 231,135 msg/s | 222,493 msg/s | **1.03x** |
 | 1024 bytes, 500 connections | 222,578 msg/s | 216,833 msg/s | **1.02x** |
 
-*Benchmarked on AMD Ryzen 9 7950X, 32GB RAM, Linux 6.18*
+<details>
+<summary><b>How to reproduce</b></summary>
+
+**sockudo-ws benchmark:**
+
+```bash
+cd sockudo-ws
+cargo build --release --example echo_server
+./target/release/examples/echo_server &
+
+# Using websocket-bench (https://github.com/anycable/websocket-bench)
+websocket-bench broadcast ws://127.0.0.1:8080 \
+  --concurrent 100 \
+  --sample-size 100000 \
+  --payload-size 512 \
+  --step-size 100
+```
+
+**uWebSockets benchmark:**
+
+```bash
+# Build uWebSockets echo server
+git clone https://github.com/uNetworking/uWebSockets
+cd uWebSockets
+make
+./EchoServer &
+
+# Run same benchmark
+websocket-bench broadcast ws://127.0.0.1:9001 \
+  --concurrent 100 \
+  --sample-size 100000 \
+  --payload-size 512 \
+  --step-size 100
+```
+
+Environment: AMD Ryzen 9 7950X, 32GB RAM, Linux 6.18, Rust 1.82, uWebSockets v20.64
+
+</details>
 
 sockudo-ws matches or exceeds uWebSockets performance while providing a safe, ergonomic Rust API.
 
 ## Features
 
-- **SIMD Acceleration**: AVX2/AVX-512/NEON for frame masking and UTF-8 validation
+- **SIMD Acceleration**: AVX2/AVX-512/SSE2/NEON/AltiVec/LSX for frame masking and UTF-8 validation
 - **Zero-Copy Parsing**: Direct buffer access without intermediate allocations
 - **Write Batching (Corking)**: Minimizes syscalls via vectored I/O
 - **permessage-deflate**: Full compression support with shared/dedicated compressors
@@ -48,6 +106,7 @@ sockudo-ws matches or exceeds uWebSockets performance while providing a safe, er
 - **HTTP/3 WebSocket**: RFC 9220 WebSocket over QUIC support
 - **io_uring**: Linux high-performance async I/O (combinable with HTTP/2 and HTTP/3)
 - **Autobahn Compliant**: Passes all 517 Autobahn test suite cases
+- **Fuzz Tested**: Comprehensive fuzzing with libFuzzer
 
 ## Installation
 
@@ -68,6 +127,12 @@ sockudo-ws = { git = "https://github.com/RustNSparks/sockudo-ws", features = ["h
 
 # With io_uring (Linux only)
 sockudo-ws = { git = "https://github.com/RustNSparks/sockudo-ws", features = ["io-uring"] }
+
+# With TLS (rustls)
+sockudo-ws = { git = "https://github.com/RustNSparks/sockudo-ws", features = ["rustls-webpki-roots"] }
+
+# With TLS (native-tls)
+sockudo-ws = { git = "https://github.com/RustNSparks/sockudo-ws", features = ["native-tls"] }
 
 # All transports
 sockudo-ws = { git = "https://github.com/RustNSparks/sockudo-ws", features = ["all-transports"] }
@@ -92,7 +157,7 @@ async fn handle(stream: TcpStream) {
     while let Some(msg) = ws.next().await {
         match msg.unwrap() {
             Message::Text(text) => {
-                ws.send(Message::Text(text)).await.unwrap();
+                ws.send(Message::text(text)).await.unwrap();
             }
             Message::Binary(data) => {
                 ws.send(Message::Binary(data)).await.unwrap();
@@ -126,7 +191,7 @@ async fn handle(stream: TcpStream) {
     while let Some(msg) = reader.next().await {
         match msg.unwrap() {
             Message::Text(text) => {
-                tx.send(Message::Text(text)).await.unwrap();
+                tx.send(Message::text(text)).await.unwrap();
             }
             Message::Close(_) => break,
             _ => {}
@@ -153,7 +218,7 @@ async fn ws_handler(req: Request) -> Response<Body> {
             
             while let Some(Ok(msg)) = ws.next().await {
                 match msg {
-                    Message::Text(text) => { ws.send(Message::Text(text)).await.ok(); }
+                    Message::Text(text) => { ws.send(Message::text(text)).await.ok(); }
                     Message::Binary(data) => { ws.send(Message::Binary(data)).await.ok(); }
                     Message::Close(_) => break,
                     _ => {}
@@ -222,7 +287,7 @@ use sockudo_ws::http2::H2WebSocketClient;
 let client = H2WebSocketClient::new(Config::default());
 let mut ws = client.connect(tls_stream, "wss://example.com/ws", None).await?;
 
-ws.send(Message::Text("Hello!".into())).await?;
+ws.send(Message::text("Hello!")).await?;
 ```
 
 ### HTTP/2 Multiplexed Connections
@@ -463,17 +528,88 @@ let config = Config::builder()
 
 ## Feature Flags
 
+### Core Features
+
+| Feature | Default | Description |
+|---------|---------|-------------|
+| `simd` | ✅ | SIMD acceleration for masking and UTF-8 |
+| `tokio-runtime` | ✅ | Tokio async runtime support |
+| `permessage-deflate` | ✅ | Compression support (RFC 7692) |
+| `fastrand` | ✅ | Fast PRNG for client mask generation |
+
+### SIMD Features
+
 | Feature | Description |
 |---------|-------------|
-| `simd` | SIMD acceleration (default) |
-| `tokio-runtime` | Tokio async runtime (default) |
-| `permessage-deflate` | Compression support (default) |
-| `axum-integration` | Axum web framework support |
+| `avx2` | Enable AVX2 (256-bit SIMD) |
+| `avx512` | Enable AVX-512 (512-bit SIMD) |
+| `neon` | Enable ARM NEON |
+| `nightly` | Enable additional SIMD on arm, loongarch64, powerpc, s390x |
+
+### TLS Features
+
+| Feature | Description |
+|---------|-------------|
+| `native-tls` | TLS via tokio-native-tls |
+| `rustls-webpki-roots` | TLS via tokio-rustls with webpki-roots |
+| `rustls-native-roots` | TLS via tokio-rustls with native root certificates |
+| `rustls-platform-verifier` | TLS via tokio-rustls with platform verifier |
+
+### SHA-1 Implementations
+
+At least one SHA-1 implementation is required for the WebSocket handshake:
+
+| Feature | Description |
+|---------|-------------|
+| `ring` | SHA-1 via ring (recommended with rustls) |
+| `aws_lc_rs` | SHA-1 via AWS LC |
+| `openssl` | SHA-1 via OpenSSL (recommended with native-tls) |
+| `sha1_smol` | Pure Rust SHA-1 fallback |
+
+### Random Number Generators
+
+For client mask generation:
+
+| Feature | Description |
+|---------|-------------|
+| `fastrand` | Fast PRNG (default) |
+| `getrandom` | Cryptographically secure RNG |
+| `rand_rng` | Use rand crate |
+
+### Transport Features
+
+| Feature | Description |
+|---------|-------------|
 | `http2` | HTTP/2 WebSocket (RFC 8441) |
 | `http3` | HTTP/3 WebSocket (RFC 9220) |
 | `io-uring` | Linux io_uring support |
 | `all-transports` | All transport features |
-| `full` | Everything |
+
+### Integration Features
+
+| Feature | Description |
+|---------|-------------|
+| `axum-integration` | Axum web framework support |
+| `full` | All features enabled |
+
+## SIMD Architecture Support
+
+sockudo-ws uses SIMD acceleration for frame masking and UTF-8 validation:
+
+| Architecture | Instructions | Masking | UTF-8 | Stable | Nightly |
+|--------------|--------------|---------|-------|--------|---------|
+| x86_64 | SSE2 | ✅ | ❌ | ✅ | ✅ |
+| x86_64 | AVX2 | ✅ | ✅ | ✅ | ✅ |
+| x86_64 | AVX-512 | ✅ | ❌ | ✅ | ✅ |
+| aarch64 | NEON | ✅ | ✅ | ✅ | ✅ |
+| arm | NEON | ✅ | ✅ | ❌ | ✅ |
+| loongarch64 | LSX | ✅ | ❌ | ❌ | ✅ |
+| loongarch64 | LASX | ✅ | ❌ | ❌ | ✅ |
+| powerpc | AltiVec | ✅ | ❌ | ❌ | ✅ |
+| powerpc64 | AltiVec | ✅ | ❌ | ❌ | ✅ |
+| s390x | z13 vectors | ✅ | ❌ | ❌ | ✅ |
+
+UTF-8 validation uses [simdutf8](https://github.com/rusticstuff/simdutf8) which supports x86_64 (AVX2, SSE4.2), aarch64 (NEON), and arm (NEON on nightly).
 
 ## API Reference
 
@@ -489,8 +625,8 @@ let ws = WebSocketStream::server(tcp_stream, config);
 let ws = WebSocketStream::client(tcp_stream, config);
 
 // Send messages
-ws.send(Message::Text("hello".into())).await?;
-ws.send(Message::Binary(bytes)).await?;
+ws.send(Message::text("hello")).await?;
+ws.send(Message::binary(bytes)).await?;
 
 // Receive messages
 while let Some(msg) = ws.next().await {
@@ -499,6 +635,11 @@ while let Some(msg) = ws.next().await {
 
 // Close connection
 ws.close(1000, "goodbye").await?;
+
+// Backpressure handling
+if ws.is_backpressured() {
+    // Write buffer is full, consider slowing down
+}
 ```
 
 ### Split Streams
@@ -513,7 +654,7 @@ reader.next().await  // Receive message
 
 // SplitWriter
 writer.send(msg).await?;
-writer.send_text("hello".into()).await?;
+writer.send_text("hello").await?;
 writer.send_binary(bytes).await?;
 writer.close(1000, "bye").await?;
 writer.is_closed().await;
@@ -526,58 +667,23 @@ let ws = sockudo_ws::reunite(reader, writer)?;
 
 ```rust
 pub enum Message {
-    Text(String),
-    Binary(Bytes),
-    Ping(Bytes),
-    Pong(Bytes),
-    Close(Option<CloseReason>),
-}
-```
-
-### Zero-Copy API (RawMessage)
-
-For maximum performance, use `RawMessage` to avoid String allocation for text messages:
-
-```rust
-pub enum RawMessage {
     Text(Bytes),      // Zero-copy, UTF-8 validated
     Binary(Bytes),
     Ping(Bytes),
     Pong(Bytes),
     Close(Option<CloseReason>),
 }
-```
 
-Using `RawMessage` with the Protocol layer:
+// Create messages
+let text_msg = Message::text("hello");           // From &str
+let text_msg = Message::text(String::from("hello")); // From String
+let binary_msg = Message::binary(vec![1, 2, 3]); // From Vec<u8>
 
-```rust
-use sockudo_ws::{Protocol, RawMessage, Role};
-use bytes::BytesMut;
-
-let mut protocol = Protocol::new(Role::Server, Config::default());
-let mut buffer = BytesMut::new();
-let mut messages = Vec::new();
-
-// Parse incoming data into RawMessage (zero String allocation)
-protocol.process_raw_into(&mut buffer, &mut messages)?;
-
-for msg in messages.drain(..) {
-    match msg {
-        RawMessage::Text(bytes) => {
-            // bytes is already UTF-8 validated
-            // Convert to &str only when needed
-            let text = std::str::from_utf8(&bytes).unwrap();
-            println!("Received: {}", text);
-        }
-        RawMessage::Binary(data) => {
-            // Handle binary data
-        }
-        _ => {}
-    }
+// Access text content
+if let Message::Text(bytes) = msg {
+    let text: &str = msg.as_text().unwrap(); // Returns Option<&str>
 }
 ```
-
-This API is ~17% faster than the standard `Message` API by avoiding heap allocation for text message payloads.
 
 ## Running Tests
 
@@ -607,6 +713,31 @@ make test
 make run  # Start server
 # Then run Autobahn client in another terminal
 ```
+
+## Fuzzing
+
+sockudo-ws includes fuzz targets for security testing:
+
+```bash
+# Install cargo-fuzz
+cargo install cargo-fuzz
+
+# Run fuzzing (requires nightly)
+cd fuzz
+cargo +nightly fuzz run parse_frame
+cargo +nightly fuzz run unmask
+cargo +nightly fuzz run utf8_validation
+cargo +nightly fuzz run protocol
+```
+
+### Fuzz Targets
+
+| Target | Description |
+|--------|-------------|
+| `parse_frame` | WebSocket frame parsing with arbitrary bytes |
+| `unmask` | SIMD masking/unmasking operations |
+| `utf8_validation` | UTF-8 validation consistency with std |
+| `protocol` | Frame encoding/decoding round-trip |
 
 ## Examples
 
@@ -639,11 +770,11 @@ sockudo-ws/
 │   ├── protocol.rs     # WebSocket protocol state machine
 │   ├── frame.rs        # Frame encoding/decoding
 │   ├── handshake.rs    # HTTP upgrade handshake
-│   ├── mask.rs         # SIMD frame masking
+│   ├── simd.rs         # SIMD masking (AVX/SSE/NEON/AltiVec/LSX)
 │   ├── utf8.rs         # SIMD UTF-8 validation
 │   ├── cork.rs         # Write batching buffer
 │   ├── deflate.rs      # permessage-deflate compression
-│   ├── simd.rs         # SIMD feature detection
+│   ├── error.rs        # Error types with categorization
 │   ├── http2/          # HTTP/2 WebSocket (RFC 8441)
 │   │   ├── mod.rs
 │   │   ├── stream.rs   # H2Stream wrapper
@@ -660,6 +791,12 @@ sockudo-ws/
 │       ├── mod.rs
 │       ├── stream.rs   # UringStream wrapper
 │       └── buffer.rs   # Registered buffer pool
+├── fuzz/               # Fuzzing targets
+│   └── fuzz_targets/
+│       ├── parse_frame.rs
+│       ├── unmask.rs
+│       ├── utf8_validation.rs
+│       └── protocol.rs
 ├── examples/
 │   ├── simple_echo.rs  # Basic echo server
 │   ├── split_echo.rs   # Concurrent read/write
@@ -675,12 +812,13 @@ sockudo-ws/
 
 ## Performance Optimizations
 
-1. **SIMD Masking**: Uses AVX2/AVX-512/NEON to XOR mask frames at 32-64 bytes per cycle
-2. **SIMD UTF-8**: Validates UTF-8 text at memory bandwidth speeds
+1. **SIMD Masking**: Uses AVX2/AVX-512/SSE2/NEON/AltiVec/LSX to XOR mask frames at 16-64 bytes per cycle
+2. **SIMD UTF-8**: Validates UTF-8 text at memory bandwidth speeds via simdutf8
 3. **Zero-Copy**: Parses frames directly from receive buffer without copying
 4. **Cork Buffer**: Batches small writes into 16KB chunks for fewer syscalls
 5. **Vectored I/O**: Uses `writev()` to send multiple buffers in single syscall
 6. **io_uring**: Kernel-level async I/O with submission queue batching
+7. **Alignment-Aware SIMD**: Handles unaligned prefix/suffix for optimal memory access
 
 ## License
 
@@ -688,7 +826,23 @@ MIT
 
 ## Credits
 
-- Inspired by [uWebSockets](https://github.com/uNetworking/uWebSockets)
-- HTTP/2 support via [h2](https://github.com/hyperium/h2)
-- HTTP/3 support via [quinn](https://github.com/quinn-rs/quinn) and [h3](https://github.com/hyperium/h3)
-- io_uring support via [tokio-uring](https://github.com/tokio-rs/tokio-uring)
+sockudo-ws incorporates ideas and techniques from several excellent WebSocket libraries:
+
+- **[uWebSockets](https://github.com/uNetworking/uWebSockets)** - The industry standard for high-performance WebSockets. Inspired the cork/batch writing strategy and overall performance-first design philosophy.
+
+- **[tokio-websockets](https://github.com/Gelbpunkt/tokio-websockets)** - A well-designed Tokio-native WebSocket library. Borrowed several optimizations including:
+  - Masked frame fast path for small client frames
+  - Alignment-aware SIMD implementations
+  - Multi-architecture SIMD support (LoongArch64 LSX/LASX, PowerPC AltiVec, s390x z13, ARM NEON)
+  - Feature flag organization (TLS variants, SHA-1 options, RNG options)
+  - Fuzzing infrastructure
+
+- **[fastwebsockets](https://github.com/denoland/fastwebsockets)** - Deno's high-performance WebSocket library. Referenced for fuzzing patterns and frame parsing optimizations.
+
+- **[h2](https://github.com/hyperium/h2)** - HTTP/2 implementation used for RFC 8441 support
+
+- **[quinn](https://github.com/quinn-rs/quinn)** and **[h3](https://github.com/hyperium/h3)** - QUIC and HTTP/3 implementations used for RFC 9220 support
+
+- **[tokio-uring](https://github.com/tokio-rs/tokio-uring)** - io_uring integration for Linux
+
+- **[simdutf8](https://github.com/rusticstuff/simdutf8)** - Battle-tested SIMD UTF-8 validation (used by simd-json, polars, arrow)

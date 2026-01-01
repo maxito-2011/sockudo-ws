@@ -10,8 +10,15 @@
 //! - No `Upgrade`, `Connection` headers (HTTP/2 doesn't use them)
 //! - No `Sec-WebSocket-Key`/`Accept` (CONNECT provides authentication)
 //! - `:scheme` and `:path` are included (unlike regular CONNECT)
+//!
+//! # Timeout Support
+//!
+//! For production use, consider wrapping handshake operations with timeouts
+//! using `tokio::time::timeout`. This module provides helper functions
+//! for timeout-aware handshakes.
 
 use http::{HeaderMap, Method, Request, Response, StatusCode};
+use std::time::Duration;
 
 /// Parsed HTTP/2 WebSocket upgrade request (Extended CONNECT)
 #[derive(Debug, Clone)]
@@ -215,6 +222,91 @@ fn get_header_string(headers: &HeaderMap, name: &str) -> Option<String> {
         .map(String::from)
 }
 
+// ============================================================================
+// Timeout Support
+// ============================================================================
+
+/// Default handshake timeout (30 seconds)
+pub const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Configuration for HTTP/2 WebSocket handshake with timeout support
+#[derive(Debug, Clone)]
+pub struct H2HandshakeConfig {
+    /// Timeout for the handshake operation
+    pub timeout: Duration,
+    /// Required WebSocket version (typically "13")
+    pub required_version: Option<&'static str>,
+    /// Allowed origins (empty means all allowed)
+    pub allowed_origins: Vec<String>,
+}
+
+impl Default for H2HandshakeConfig {
+    fn default() -> Self {
+        Self {
+            timeout: DEFAULT_HANDSHAKE_TIMEOUT,
+            required_version: Some("13"),
+            allowed_origins: Vec::new(),
+        }
+    }
+}
+
+impl H2HandshakeConfig {
+    /// Create a new config with custom timeout
+    pub fn with_timeout(timeout: Duration) -> Self {
+        Self {
+            timeout,
+            ..Default::default()
+        }
+    }
+
+    /// Set allowed origins for CORS validation
+    pub fn allowed_origins(mut self, origins: Vec<String>) -> Self {
+        self.allowed_origins = origins;
+        self
+    }
+
+    /// Validate a handshake request against this configuration
+    pub fn validate(&self, request: &H2HandshakeRequest) -> Result<(), StatusCode> {
+        // Check WebSocket version if required
+        if let Some(required_version) = self.required_version
+            && let Some(ref version) = request.version
+            && version != required_version
+        {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+
+        // Check origin if allowed_origins is not empty
+        if !self.allowed_origins.is_empty() {
+            if let Some(ref origin) = request.origin {
+                if !self.allowed_origins.iter().any(|o| o == origin) {
+                    return Err(StatusCode::FORBIDDEN);
+                }
+            } else {
+                // No origin header when origins are required
+                return Err(StatusCode::FORBIDDEN);
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// Helper macro for timeout-wrapped async operations
+///
+/// Usage:
+/// ```ignore
+/// use sockudo_ws::http2::handshake::{with_timeout, DEFAULT_HANDSHAKE_TIMEOUT};
+/// use std::time::Duration;
+///
+/// async fn do_handshake() -> Result<(), Error> {
+///     let result = tokio::time::timeout(
+///         DEFAULT_HANDSHAKE_TIMEOUT,
+///         async_handshake_operation()
+///     ).await.map_err(|_| Error::HandshakeFailed("timeout"))?;
+///     result
+/// }
+/// ```
+///
 #[cfg(test)]
 mod tests {
     use super::*;

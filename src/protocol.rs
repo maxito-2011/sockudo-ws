@@ -26,31 +26,12 @@ pub enum Role {
 }
 
 /// WebSocket message (complete, possibly assembled from fragments)
+///
+/// Text messages use `Bytes` internally for zero-copy efficiency.
+/// The payload is UTF-8 validated during parsing, so `as_text()` is safe.
 #[derive(Debug, Clone)]
 pub enum Message {
-    /// Text message
-    Text(String),
-    /// Binary message
-    Binary(Bytes),
-    /// Ping message
-    Ping(Bytes),
-    /// Pong message
-    Pong(Bytes),
-    /// Close message
-    Close(Option<CloseReason>),
-}
-
-/// Zero-copy WebSocket message using Bytes for all payloads
-///
-/// This is a high-performance alternative to `Message` that avoids
-/// String allocation for text messages. The caller is responsible
-/// for UTF-8 validation if needed.
-///
-/// Use `Protocol::process_raw()` or `Protocol::process_raw_into()`
-/// to receive messages in this format.
-#[derive(Debug, Clone)]
-pub enum RawMessage {
-    /// Text message (UTF-8 validated, zero-copy Bytes)
+    /// Text message (UTF-8 validated, stored as Bytes for zero-copy)
     Text(Bytes),
     /// Binary message
     Binary(Bytes),
@@ -62,93 +43,47 @@ pub enum RawMessage {
     Close(Option<CloseReason>),
 }
 
-impl RawMessage {
+impl Message {
+    /// Create a text message from a string
+    #[inline]
+    pub fn text(s: impl Into<String>) -> Self {
+        Message::Text(Bytes::from(s.into()))
+    }
+
+    /// Create a binary message
+    #[inline]
+    pub fn binary(data: impl Into<Bytes>) -> Self {
+        Message::Binary(data.into())
+    }
+
+    /// Create a ping message
+    #[inline]
+    pub fn ping(data: impl Into<Bytes>) -> Self {
+        Message::Ping(data.into())
+    }
+
+    /// Create a pong message
+    #[inline]
+    pub fn pong(data: impl Into<Bytes>) -> Self {
+        Message::Pong(data.into())
+    }
+
     /// Check if this is a close message
     #[inline]
     pub fn is_close(&self) -> bool {
-        matches!(self, RawMessage::Close(_))
+        matches!(self, Message::Close(_))
     }
 
     /// Check if this is a text message
     #[inline]
     pub fn is_text(&self) -> bool {
-        matches!(self, RawMessage::Text(_))
+        matches!(self, Message::Text(_))
     }
 
     /// Check if this is a binary message
     #[inline]
     pub fn is_binary(&self) -> bool {
-        matches!(self, RawMessage::Binary(_))
-    }
-
-    /// Check if this is a control message
-    #[inline]
-    pub fn is_control(&self) -> bool {
-        matches!(
-            self,
-            RawMessage::Ping(_) | RawMessage::Pong(_) | RawMessage::Close(_)
-        )
-    }
-
-    /// Get message payload as bytes
-    #[inline]
-    pub fn as_bytes(&self) -> &[u8] {
-        match self {
-            RawMessage::Text(b) => b,
-            RawMessage::Binary(b) => b,
-            RawMessage::Ping(b) => b,
-            RawMessage::Pong(b) => b,
-            RawMessage::Close(_) => &[],
-        }
-    }
-
-    /// Get text payload as str (zero-copy, already UTF-8 validated)
-    ///
-    /// Returns None for non-text messages.
-    #[inline]
-    pub fn as_text(&self) -> Option<&str> {
-        match self {
-            RawMessage::Text(b) => {
-                // SAFETY: Text messages are UTF-8 validated during parsing
-                Some(unsafe { std::str::from_utf8_unchecked(b) })
-            }
-            _ => None,
-        }
-    }
-
-    /// Convert to owned Bytes
-    #[inline]
-    pub fn into_bytes(self) -> Bytes {
-        match self {
-            RawMessage::Text(b) => b,
-            RawMessage::Binary(b) => b,
-            RawMessage::Ping(b) => b,
-            RawMessage::Pong(b) => b,
-            RawMessage::Close(_) => Bytes::new(),
-        }
-    }
-
-    /// Convert to Message (allocates String for text messages)
-    #[inline]
-    pub fn into_message(self) -> Message {
-        match self {
-            RawMessage::Text(b) => {
-                // SAFETY: Text messages are UTF-8 validated during parsing
-                Message::Text(unsafe { String::from_utf8_unchecked(Vec::from(b)) })
-            }
-            RawMessage::Binary(b) => Message::Binary(b),
-            RawMessage::Ping(b) => Message::Ping(b),
-            RawMessage::Pong(b) => Message::Pong(b),
-            RawMessage::Close(r) => Message::Close(r),
-        }
-    }
-}
-
-impl Message {
-    /// Check if this is a close message
-    #[inline]
-    pub fn is_close(&self) -> bool {
-        matches!(self, Message::Close(_))
+        matches!(self, Message::Binary(_))
     }
 
     /// Check if this is a ping message
@@ -173,10 +108,16 @@ impl Message {
     }
 
     /// Get message as text (returns None for non-text messages)
+    ///
+    /// This is zero-copy - it returns a reference to the underlying bytes.
+    /// The text is guaranteed to be valid UTF-8 as it was validated during parsing.
     #[inline]
     pub fn as_text(&self) -> Option<&str> {
         match self {
-            Message::Text(s) => Some(s),
+            Message::Text(b) => {
+                // SAFETY: Text messages are UTF-8 validated during parsing
+                Some(unsafe { std::str::from_utf8_unchecked(b) })
+            }
             _ => None,
         }
     }
@@ -185,7 +126,7 @@ impl Message {
     #[inline]
     pub fn as_bytes(&self) -> &[u8] {
         match self {
-            Message::Text(s) => s.as_bytes(),
+            Message::Text(b) => b,
             Message::Binary(b) => b,
             Message::Ping(b) => b,
             Message::Pong(b) => b,
@@ -193,10 +134,26 @@ impl Message {
         }
     }
 
-    /// Convert to text message
+    /// Convert to text message (allocates a String)
+    ///
+    /// Returns None for non-text messages.
     pub fn into_text(self) -> Option<String> {
         match self {
-            Message::Text(s) => Some(s),
+            Message::Text(b) => {
+                // SAFETY: Text messages are UTF-8 validated during parsing
+                Some(unsafe { String::from_utf8_unchecked(b.to_vec()) })
+            }
+            _ => None,
+        }
+    }
+
+    /// Get the underlying Bytes for text messages (zero-copy)
+    ///
+    /// Returns None for non-text messages.
+    #[inline]
+    pub fn text_bytes(&self) -> Option<&Bytes> {
+        match self {
+            Message::Text(b) => Some(b),
             _ => None,
         }
     }
@@ -204,7 +161,7 @@ impl Message {
     /// Convert to binary data
     pub fn into_bytes(self) -> Bytes {
         match self {
-            Message::Text(s) => Bytes::from(s),
+            Message::Text(b) => b,
             Message::Binary(b) => b,
             Message::Ping(b) => b,
             Message::Pong(b) => b,
@@ -215,13 +172,13 @@ impl Message {
 
 impl From<String> for Message {
     fn from(s: String) -> Self {
-        Message::Text(s)
+        Message::Text(Bytes::from(s))
     }
 }
 
 impl From<&str> for Message {
     fn from(s: &str) -> Self {
-        Message::Text(s.to_string())
+        Message::Text(Bytes::copy_from_slice(s.as_bytes()))
     }
 }
 
@@ -336,43 +293,6 @@ impl Protocol {
         Ok(())
     }
 
-    /// Process incoming data and return zero-copy raw messages
-    ///
-    /// This is the highest-performance API - it returns `RawMessage` which
-    /// uses `Bytes` for text payloads instead of allocating a `String`.
-    /// UTF-8 validation is still performed, but no copy is made.
-    #[inline]
-    pub fn process_raw(&mut self, buf: &mut BytesMut) -> Result<Vec<RawMessage>> {
-        let mut messages = Vec::new();
-        self.process_raw_into(buf, &mut messages)?;
-        Ok(messages)
-    }
-
-    /// Process incoming data into a reusable raw message buffer (zero-allocation hot path)
-    ///
-    /// This is the highest-performance API for receiving messages.
-    #[inline]
-    pub fn process_raw_into(
-        &mut self,
-        buf: &mut BytesMut,
-        messages: &mut Vec<RawMessage>,
-    ) -> Result<()> {
-        messages.clear();
-
-        while !buf.is_empty() {
-            match self.parser.parse(buf)? {
-                Some(frame) => {
-                    if let Some(msg) = self.handle_frame_raw(frame)? {
-                        messages.push(msg);
-                    }
-                }
-                None => break,
-            }
-        }
-
-        Ok(())
-    }
-
     /// Handle a single parsed frame
     fn handle_frame(&mut self, frame: Frame) -> Result<Option<Message>> {
         match frame.header.opcode {
@@ -382,23 +302,6 @@ impl Protocol {
             OpCode::Close => self.handle_close(frame),
             OpCode::Ping => self.handle_ping(frame),
             OpCode::Pong => self.handle_pong(frame),
-        }
-    }
-
-    /// Handle a single parsed frame returning RawMessage (zero-copy)
-    fn handle_frame_raw(&mut self, frame: Frame) -> Result<Option<RawMessage>> {
-        match frame.header.opcode {
-            OpCode::Continuation => self.handle_continuation_raw(frame),
-            OpCode::Text => self.handle_text_raw(frame),
-            OpCode::Binary => self.handle_binary_raw(frame),
-            OpCode::Close => self.handle_close(frame).map(|opt| {
-                opt.map(|m| match m {
-                    Message::Close(r) => RawMessage::Close(r),
-                    _ => unreachable!(),
-                })
-            }),
-            OpCode::Ping => Ok(Some(RawMessage::Ping(frame.payload))),
-            OpCode::Pong => Ok(Some(RawMessage::Pong(frame.payload))),
         }
     }
 
@@ -413,31 +316,8 @@ impl Protocol {
             if !validate_utf8(&frame.payload) {
                 return Err(Error::InvalidUtf8);
             }
-            // SAFETY: We just validated UTF-8
-            // Use Vec::from which can avoid copy for uniquely owned Bytes
-            let text = unsafe { String::from_utf8_unchecked(Vec::from(frame.payload)) };
-            Ok(Some(Message::Text(text)))
-        } else {
-            // Start of fragmented message
-            self.start_fragment(OpCode::Text, frame.payload)?;
-            Ok(None)
-        }
-    }
-
-    /// Handle text frame (zero-copy)
-    #[inline]
-    fn handle_text_raw(&mut self, frame: Frame) -> Result<Option<RawMessage>> {
-        if self.fragment_opcode.is_some() {
-            return Err(Error::Protocol("expected continuation frame"));
-        }
-
-        if frame.header.fin {
-            // Complete message in one frame (fast path)
-            if !validate_utf8(&frame.payload) {
-                return Err(Error::InvalidUtf8);
-            }
-            // Zero-copy: just return the Bytes directly
-            Ok(Some(RawMessage::Text(frame.payload)))
+            // Zero-copy: just return the Bytes directly (already UTF-8 validated)
+            Ok(Some(Message::Text(frame.payload)))
         } else {
             // Start of fragmented message
             self.start_fragment(OpCode::Text, frame.payload)?;
@@ -454,23 +334,6 @@ impl Protocol {
         if frame.header.fin {
             // Complete message in one frame (fast path)
             Ok(Some(Message::Binary(frame.payload)))
-        } else {
-            // Start of fragmented message
-            self.start_fragment(OpCode::Binary, frame.payload)?;
-            Ok(None)
-        }
-    }
-
-    /// Handle binary frame (zero-copy)
-    #[inline]
-    fn handle_binary_raw(&mut self, frame: Frame) -> Result<Option<RawMessage>> {
-        if self.fragment_opcode.is_some() {
-            return Err(Error::Protocol("expected continuation frame"));
-        }
-
-        if frame.header.fin {
-            // Complete message in one frame (fast path)
-            Ok(Some(RawMessage::Binary(frame.payload)))
         } else {
             // Start of fragmented message
             self.start_fragment(OpCode::Binary, frame.payload)?;
@@ -495,35 +358,6 @@ impl Protocol {
         if frame.header.fin {
             // Complete the fragmented message
             self.complete_fragment(opcode)
-        } else {
-            // Validate partial UTF-8 for text messages
-            if opcode == OpCode::Text {
-                let (valid, _incomplete) = validate_utf8_incomplete(&self.fragment_buf);
-                if !valid {
-                    return Err(Error::InvalidUtf8);
-                }
-            }
-            Ok(None)
-        }
-    }
-
-    /// Handle continuation frame (zero-copy)
-    fn handle_continuation_raw(&mut self, frame: Frame) -> Result<Option<RawMessage>> {
-        let opcode = self
-            .fragment_opcode
-            .ok_or(Error::Protocol("unexpected continuation frame"))?;
-
-        // Check total size
-        let new_size = self.fragment_buf.len() + frame.payload.len();
-        if new_size > self.max_message_size {
-            return Err(Error::MessageTooLarge);
-        }
-
-        self.fragment_buf.extend_from_slice(&frame.payload);
-
-        if frame.header.fin {
-            // Complete the fragmented message
-            self.complete_fragment_raw(opcode)
         } else {
             // Validate partial UTF-8 for text messages
             if opcode == OpCode::Text {
@@ -567,29 +401,10 @@ impl Protocol {
                 if !validate_utf8(&data) {
                     return Err(Error::InvalidUtf8);
                 }
-                // SAFETY: We just validated UTF-8
-                let text = unsafe { String::from_utf8_unchecked(Vec::from(data)) };
-                Ok(Some(Message::Text(text)))
+                // Zero-copy: just return the Bytes directly (already UTF-8 validated)
+                Ok(Some(Message::Text(data)))
             }
             OpCode::Binary => Ok(Some(Message::Binary(data))),
-            _ => Err(Error::Protocol("invalid fragment opcode")),
-        }
-    }
-
-    /// Complete a fragmented message (zero-copy)
-    fn complete_fragment_raw(&mut self, opcode: OpCode) -> Result<Option<RawMessage>> {
-        self.fragment_opcode = None;
-        let data = self.fragment_buf.split().freeze();
-
-        match opcode {
-            OpCode::Text => {
-                if !validate_utf8(&data) {
-                    return Err(Error::InvalidUtf8);
-                }
-                // Zero-copy: just return the Bytes directly
-                Ok(Some(RawMessage::Text(data)))
-            }
-            OpCode::Binary => Ok(Some(RawMessage::Binary(data))),
             _ => Err(Error::Protocol("invalid fragment opcode")),
         }
     }
@@ -655,8 +470,8 @@ impl Protocol {
         };
 
         match msg {
-            Message::Text(s) => {
-                encode_frame(buf, OpCode::Text, s.as_bytes(), true, mask);
+            Message::Text(b) => {
+                encode_frame(buf, OpCode::Text, b, true, mask);
             }
             Message::Binary(b) => {
                 encode_frame(buf, OpCode::Binary, b, true, mask);
@@ -870,9 +685,8 @@ impl CompressedProtocol {
             if !validate_utf8(&payload) {
                 return Err(Error::InvalidUtf8);
             }
-            // SAFETY: We just validated UTF-8
-            let text = unsafe { String::from_utf8_unchecked(Vec::from(payload)) };
-            Ok(Some(Message::Text(text)))
+            // Zero-copy: just return the Bytes directly (already UTF-8 validated)
+            Ok(Some(Message::Text(payload)))
         } else {
             // Start of fragmented message
             if DEBUG {
@@ -962,9 +776,8 @@ impl CompressedProtocol {
                 if !validate_utf8(&data) {
                     return Err(Error::InvalidUtf8);
                 }
-                // SAFETY: We just validated UTF-8
-                let text = unsafe { String::from_utf8_unchecked(Vec::from(data)) };
-                Ok(Some(Message::Text(text)))
+                // Zero-copy: just return the Bytes directly (already UTF-8 validated)
+                Ok(Some(Message::Text(data)))
             }
             OpCode::Binary => Ok(Some(Message::Binary(data))),
             _ => Err(Error::Protocol("invalid fragment opcode")),
@@ -980,12 +793,12 @@ impl CompressedProtocol {
         };
 
         match msg {
-            Message::Text(s) => {
+            Message::Text(b) => {
                 // Try to compress
-                if let Some(compressed) = self.deflate.compress(s.as_bytes())? {
+                if let Some(compressed) = self.deflate.compress(b)? {
                     encode_frame_with_rsv(buf, OpCode::Text, &compressed, true, mask, true);
                 } else {
-                    encode_frame(buf, OpCode::Text, s.as_bytes(), true, mask);
+                    encode_frame(buf, OpCode::Text, b, true, mask);
                 }
             }
             Message::Binary(b) => {
@@ -1084,7 +897,7 @@ mod tests {
         let mut buf = BytesMut::new();
 
         protocol
-            .encode_message(&Message::Text("test".to_string()), &mut buf)
+            .encode_message(&Message::text("test"), &mut buf)
             .unwrap();
 
         assert_eq!(buf[0], 0x81); // FIN + Text

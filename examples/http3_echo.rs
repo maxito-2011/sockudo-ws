@@ -69,7 +69,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             while let Some(msg) = ws.next().await {
                 match msg {
                     Ok(Message::Text(text)) => {
-                        println!("Received text: {}", text);
+                        println!(
+                            "Received text: {}",
+                            std::str::from_utf8(&text).unwrap_or("<invalid utf8>")
+                        );
                         if ws.send(Message::Text(text)).await.is_err() {
                             break;
                         }
