@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.3] - 2026-01-01
+
+### Fixed
+
+- Critical bug: Misaligned pointer dereference in scalar masking fallback
+  - The alignment check was incorrectly using `(i + mask_idx) & 7` instead of checking actual pointer address
+  - Could cause panics on architectures that enforce pointer alignment when casting to `*mut u64`
+  - Now correctly checks `(ptr_addr + i) & 7` to ensure 8-byte alignment before u64 operations
+  - Discovered through fuzzing with cargo-fuzz
+
 ## [1.4.2] - 2026-01-01
 
 ### Added
