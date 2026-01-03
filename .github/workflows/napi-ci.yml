@@ -149,6 +149,26 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        working-directory: napi-bindings
+        run: npm ci || npm install
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: napi-bindings/artifacts
+
+      - name: Create npm dirs and move artifacts
+        working-directory: napi-bindings
+        run: |
+          npx napi create-npm-dirs
+          npm run artifacts
+
       - name: Setup Deno
         uses: denoland/setup-deno@v1
         with:
@@ -156,4 +176,4 @@ jobs:
 
       - name: Publish to JSR
         working-directory: napi-bindings
-        run: npx jsr publish --allow-dirty
+        run: npx jsr publish --allow-dirty --allow-slow-types
