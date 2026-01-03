@@ -102,6 +102,7 @@ sockudo-ws matches or exceeds uWebSockets performance while providing a safe, er
 - **Write Batching (Corking)**: Minimizes syscalls via vectored I/O
 - **permessage-deflate**: Full compression support with shared/dedicated compressors
 - **Split Streams**: Concurrent read/write from separate tasks
+- **Pub/Sub System**: High-performance topic-based messaging with sender exclusion
 - **HTTP/2 WebSocket**: RFC 8441 Extended CONNECT protocol support
 - **HTTP/3 WebSocket**: RFC 9220 WebSocket over QUIC support
 - **io_uring**: Linux high-performance async I/O (combinable with HTTP/2 and HTTP/3)
@@ -201,6 +202,85 @@ async fn handle(stream: TcpStream) {
         }
     }
 }
+```
+
+### Pub/Sub System
+
+sockudo-ws includes a high-performance pub/sub system for topic-based messaging, inspired by uWebSockets/Bun:
+
+```rust
+use sockudo_ws::pubsub::PubSub;
+use sockudo_ws::Message;
+use tokio::sync::mpsc;
+
+// Create pub/sub system
+let pubsub = PubSub::new();
+
+// Create a subscriber with a message channel
+let (tx, mut rx) = mpsc::unbounded_channel();
+let subscriber_id = pubsub.create_subscriber(tx);
+
+// Subscribe to topics
+pubsub.subscribe(subscriber_id, "chat/general");
+pubsub.subscribe(subscriber_id, "notifications");
+
+// Publish to all subscribers
+let msg = Message::text("Hello everyone!");
+pubsub.publish("chat/general", msg);
+
+// Publish excluding a specific subscriber (useful for echo prevention)
+let msg = Message::text("Broadcast from user");
+pubsub.publish_excluding(subscriber_id, "chat/general", msg);
+
+// Unsubscribe from a topic
+pubsub.unsubscribe(subscriber_id, "chat/general");
+
+// Remove subscriber when connection closes
+pubsub.remove_subscriber(subscriber_id);
+```
+
+#### Pusher-Style Socket IDs
+
+```rust
+use sockudo_ws::pubsub::PubSub;
+
+let pubsub = PubSub::new();
+
+// Generate Pusher-style socket ID (format: "1234567890.9876543210")
+let socket_id = PubSub::generate_socket_id();
+
+// Create subscriber with custom socket ID
+let (tx, rx) = mpsc::unbounded_channel();
+let subscriber_id = pubsub.create_subscriber_with_id(&socket_id, tx);
+
+// Subscribe/publish using socket ID
+pubsub.subscribe_by_socket_id(&socket_id, "private-channel");
+pubsub.publish_excluding_socket_id(&socket_id, "chat", Message::text("Hello"));
+
+// Lookup subscriber by socket ID
+if let Some(id) = pubsub.get_subscriber_by_socket_id(&socket_id) {
+    println!("Found subscriber: {:?}", id);
+}
+```
+
+#### Pub/Sub Features
+
+- **64 Sharded Topics**: Reduced lock contention for high concurrency
+- **Lock-Free Subscriber IDs**: Atomic allocation for fast subscriber creation
+- **Zero-Copy Messages**: Uses `Bytes` for efficient message sharing
+- **Cache-Line Alignment**: Prevents false sharing in concurrent access
+- **Pusher-Style String IDs**: Optional string-based subscriber identifiers
+- **Sender Exclusion**: `publish_excluding()` prevents echo to the sender
+- **Automatic Cleanup**: Empty topics are removed automatically
+
+#### Pub/Sub Statistics
+
+```rust
+// Get statistics
+let topic_count = pubsub.topic_count();
+let subscriber_count = pubsub.subscriber_count();
+let messages_published = pubsub.messages_published();
+let subscribers_in_topic = pubsub.topic_subscriber_count("chat/general");
 ```
 
 ### Axum Integration

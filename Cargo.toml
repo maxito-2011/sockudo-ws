@@ -1,6 +1,6 @@
 [package]
 name = "sockudo-ws"
-version = "1.5.4"
+version = "1.6.0"
 edition = "2024"
 authors = ["Diaconu Radu-Mihai"]
 description = "Ultra-low latency WebSocket library for HFT applications"
@@ -91,6 +91,9 @@ full = ["simd", "tokio-runtime", "axum-integration", "permessage-deflate", "all-
 # Tokio async runtime
 tokio = { version = "^1.48", features = ["rt-multi-thread", "net", "io-util", "sync", "macros", "time"], optional = true }
 tokio-util = { version = "^0.7", features = ["codec"], optional = true }
+
+# Fast synchronization primitives for pub/sub
+parking_lot = "^0.12"
 
 # Axum integration
 axum = { version = "^0.8", optional = true }

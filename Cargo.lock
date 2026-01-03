@@ -1709,7 +1709,7 @@ dependencies = [
 
 [[package]]
 name = "sockudo-ws"
-version = "1.5.4"
+version = "1.6.0"
 dependencies = [
  "aws-lc-rs",
  "axum",
@@ -1732,6 +1732,7 @@ dependencies = [
  "mimalloc",
  "native-tls",
  "openssl",
+ "parking_lot",
  "pin-project-lite",
  "quinn",
  "rand",

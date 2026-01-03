@@ -59,6 +59,7 @@ pub mod frame;
 pub mod handshake;
 pub mod mask;
 pub mod protocol;
+pub mod pubsub;
 pub mod queue;
 pub mod simd;
 pub mod stream;
@@ -96,6 +97,7 @@ pub use error::{Error, Result};
 pub use frame::{Frame, OpCode};
 pub use handshake::HandshakeResult;
 pub use protocol::{Message, Role};
+pub use pubsub::{PubSub, PubSubState, PublishResult, SubscriberId};
 pub use stream::{ReuniteError, SplitReader, SplitWriter, Stream, WebSocketStream, reunite};
 
 // Transport re-exports
@@ -544,6 +546,7 @@ pub mod prelude {
     pub use crate::error::{Error, Result};
     pub use crate::frame::{Frame, OpCode};
     pub use crate::protocol::{Message, Role};
+    pub use crate::pubsub::{PubSub, PublishResult, SubscriberId};
     pub use crate::stream::WebSocketStream;
     pub use crate::transport::{Http1, Http2, Http3, Transport};
 

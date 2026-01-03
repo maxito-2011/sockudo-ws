@@ -1,0 +1,15 @@
+{
+  "name": "@sockudo/ws",
+  "version": "1.5.4",
+  "exports": "./index.mjs",
+  "publish": {
+    "include": [
+      "index.js",
+      "index.mjs",
+      "index.d.ts",
+      "*.node",
+      "README.md",
+      "LICENSE"
+    ]
+  }
+}
