@@ -9,8 +9,8 @@ target/
 index.js
 index.d.ts
 
-# Lock files (use pnpm-lock.yaml)
-package-lock.json
+# Lock files (pnpm)
+pnpm-lock.yaml
 
 # IDE
 .idea/

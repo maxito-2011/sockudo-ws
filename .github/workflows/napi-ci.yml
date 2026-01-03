@@ -37,34 +37,34 @@ jobs:
         settings:
           - host: macos-latest
             target: x86_64-apple-darwin
-            build: pnpm build --target x86_64-apple-darwin
+            build: npm run build -- --target x86_64-apple-darwin
           - host: macos-latest
             target: aarch64-apple-darwin
-            build: pnpm build --target aarch64-apple-darwin
+            build: npm run build -- --target aarch64-apple-darwin
           - host: windows-latest
             target: x86_64-pc-windows-msvc
-            build: pnpm build --target x86_64-pc-windows-msvc
+            build: npm run build -- --target x86_64-pc-windows-msvc
           - host: windows-latest
             target: aarch64-pc-windows-msvc
-            build: pnpm build --target aarch64-pc-windows-msvc
+            build: npm run build -- --target aarch64-pc-windows-msvc
           - host: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            build: pnpm build --target x86_64-unknown-linux-gnu
+            build: npm run build -- --target x86_64-unknown-linux-gnu
           - host: ubuntu-latest
             target: x86_64-unknown-linux-musl
-            build: pnpm build --target x86_64-unknown-linux-musl
+            build: npm run build -- --target x86_64-unknown-linux-musl
           - host: ubuntu-latest
             target: aarch64-unknown-linux-gnu
-            build: pnpm build --target aarch64-unknown-linux-gnu
+            build: npm run build -- --target aarch64-unknown-linux-gnu
           - host: ubuntu-latest
             target: aarch64-unknown-linux-musl
-            build: pnpm build --target aarch64-unknown-linux-musl
+            build: npm run build -- --target aarch64-unknown-linux-musl
           - host: ubuntu-latest
             target: armv7-unknown-linux-gnueabihf
-            build: pnpm build --target armv7-unknown-linux-gnueabihf
+            build: npm run build -- --target armv7-unknown-linux-gnueabihf
           - host: ubuntu-latest
             target: x86_64-unknown-freebsd
-            build: pnpm build --target x86_64-unknown-freebsd
+            build: npm run build -- --target x86_64-unknown-freebsd
 
     name: Build - ${{ matrix.settings.target }}
     runs-on: ${{ matrix.settings.host }}
@@ -72,17 +72,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 9
-
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: pnpm
-          cache-dependency-path: napi-bindings/pnpm-lock.yaml
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -115,7 +108,7 @@ jobs:
 
       - name: Install dependencies
         working-directory: napi-bindings
-        run: pnpm install
+        run: npm ci || npm install
 
       - name: Build
         working-directory: napi-bindings
@@ -138,21 +131,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 9
-
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: pnpm
-          cache-dependency-path: napi-bindings/pnpm-lock.yaml
 
       - name: Install dependencies
         working-directory: napi-bindings
-        run: pnpm install
+        run: npm ci || npm install
 
       - name: Download macOS x64 artifact
         uses: actions/download-artifact@v4
@@ -168,7 +154,7 @@ jobs:
 
       - name: Combine into universal binary
         working-directory: napi-bindings
-        run: pnpm universal
+        run: npm run universal
 
       - name: Upload universal artifact
         uses: actions/upload-artifact@v4
@@ -190,21 +176,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 9
-
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
-          cache: pnpm
-          cache-dependency-path: napi-bindings/pnpm-lock.yaml
 
       - name: Install dependencies
         working-directory: napi-bindings
-        run: pnpm install
+        run: npm ci || npm install
 
       - name: Download artifact
         uses: actions/download-artifact@v4
@@ -214,7 +193,7 @@ jobs:
 
       - name: Run tests
         working-directory: napi-bindings
-        run: pnpm test
+        run: npm test
 
   publish:
     name: Publish to npm
@@ -225,22 +204,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 9
-
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 24
+          node-version: 22
           registry-url: https://registry.npmjs.org
-          cache: pnpm
-          cache-dependency-path: napi-bindings/pnpm-lock.yaml
 
       - name: Install dependencies
         working-directory: napi-bindings
-        run: pnpm install
+        run: npm ci || npm install
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -249,7 +221,7 @@ jobs:
 
       - name: Move artifacts
         working-directory: napi-bindings
-        run: pnpm artifacts
+        run: npm run artifacts
 
       - name: Publish
         working-directory: napi-bindings
