@@ -126,6 +126,9 @@ jobs:
         run: |
           npx napi create-npm-dirs
           npm run artifacts
+          # Copy index.js and index.d.ts from first available artifact folder
+          find artifacts -name "index.js" -exec cp {} . \; -quit
+          find artifacts -name "index.d.ts" -exec cp {} . \; -quit
 
       - name: Prepublish (publish platform packages)
         working-directory: napi-bindings
