@@ -124,23 +124,18 @@ jobs:
           npx napi create-npm-dirs
           npm run artifacts
 
-      - name: Setup npm auth
-        run: echo "//registry.npmjs.org/:_authToken=$NPM_TOKEN" >> ~/.npmrc
-        env:
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
-
       - name: Prepublish (publish platform packages)
         working-directory: napi-bindings
         run: npm run prepublish-napi
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Publish main package
         working-directory: napi-bindings
         run: npm publish --access public --no-git-checks
         env:
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
   publish-jsr:
     name: Publish to JSR
