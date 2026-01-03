@@ -88,7 +88,10 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: bindings-${{ matrix.settings.target }}
-          path: napi-bindings/*.node
+          path: |
+            napi-bindings/*.node
+            napi-bindings/index.js
+            napi-bindings/index.d.ts
           if-no-files-found: error
 
   publish:
@@ -168,6 +171,9 @@ jobs:
         run: |
           npx napi create-npm-dirs
           npm run artifacts
+          # Copy index.js and index.d.ts from any artifact folder
+          cp artifacts/bindings-x86_64-unknown-linux-gnu/index.js . || true
+          cp artifacts/bindings-x86_64-unknown-linux-gnu/index.d.ts . || true
 
       - name: Setup Deno
         uses: denoland/setup-deno@v1
