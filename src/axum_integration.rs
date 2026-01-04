@@ -678,11 +678,12 @@ mod tests {
         
         let params = parsed_params.unwrap();
         
-        // Validate params and create config
+        // Validate params - this confirms client's offer is valid
         let validated_config = DeflateConfig::from_params(&params);
         assert!(validated_config.is_ok());
         
-        // Generate response header
+        // Generate response header using server's config (not client's)
+        // This matches the actual implementation in on_upgrade (line 116)
         let response_header = server_config.to_response_header();
         assert!(response_header.starts_with("permessage-deflate"));
         
