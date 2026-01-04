@@ -514,7 +514,13 @@ mod tests {
             assert_eq!(params[0], ("server_no_context_takeover", None));
 
             // Test parsing offer with multiple parameters
-            let offer = "permessage-deflate; server_no_context_takeover; client_no_context_takeover; server_max_window_bits=10; client_max_window_bits=12";
+            let offer = concat!(
+                "permessage-deflate; ",
+                "server_no_context_takeover; ",
+                "client_no_context_takeover; ",
+                "server_max_window_bits=10; ",
+                "client_max_window_bits=12"
+            );
             let params = crate::deflate::parse_deflate_offer(offer);
             assert!(params.is_some());
             let params = params.unwrap();
@@ -615,10 +621,14 @@ mod tests {
                 ..Default::default()
             };
             let header = config.to_response_header();
-            assert_eq!(
-                header,
-                "permessage-deflate; server_no_context_takeover; client_no_context_takeover; server_max_window_bits=10; client_max_window_bits=12"
+            let expected = concat!(
+                "permessage-deflate; ",
+                "server_no_context_takeover; ",
+                "client_no_context_takeover; ",
+                "server_max_window_bits=10; ",
+                "client_max_window_bits=12"
             );
+            assert_eq!(header, expected);
         }
 
         #[test]
