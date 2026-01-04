@@ -39,11 +39,8 @@ async fn ws_handler(ws: WebSocketUpgrade) -> impl IntoResponse {
 
 async fn handle_socket(socket: WebSocket) {
     // Split the WebSocket into reader and writer
-    // Note: split() returns Option because compressed WebSockets don't support splitting yet
-    let Some((mut reader, mut writer)) = socket.split() else {
-        eprintln!("Cannot split compressed WebSocket connection");
-        return;
-    };
+    // Both compressed and uncompressed WebSockets now support split()
+    let (mut reader, mut writer) = socket.split();
 
     // Create a channel to send messages from reader to writer
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();

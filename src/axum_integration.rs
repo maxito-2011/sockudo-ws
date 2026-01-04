@@ -48,7 +48,7 @@ use hyper_util::rt::TokioIo;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use crate::Config;
-use crate::error::{Error, Result};
+use crate::error::{CloseReason, Error, Result};
 use crate::handshake::generate_accept_key;
 use crate::protocol::{Message, Role};
 use crate::stream::WebSocketStream;
@@ -57,7 +57,7 @@ use crate::{SplitReader, SplitWriter};
 #[cfg(feature = "permessage-deflate")]
 use crate::deflate::DeflateConfig;
 #[cfg(feature = "permessage-deflate")]
-use crate::stream::CompressedWebSocketStream;
+use crate::stream::{CompressedSplitReader, CompressedSplitWriter, CompressedWebSocketStream};
 
 /// WebSocket upgrade extractor for Axum
 ///
@@ -489,7 +489,8 @@ impl WebSocket {
 
     /// Split the WebSocket into separate reader and writer halves
     ///
-    /// This allows reading and writing from separate tasks.
+    /// This allows reading and writing from separate tasks with TRUE concurrent I/O.
+    /// Both compressed and uncompressed WebSocket connections support split().
     ///
     /// # Example
     ///
@@ -498,7 +499,7 @@ impl WebSocket {
     ///
     /// // Spawn reader task
     /// tokio::spawn(async move {
-    ///     while let Some(msg) = reader.recv().await {
+    ///     while let Some(msg) = reader.next().await {
     ///         // Handle message
     ///     }
     /// });
@@ -506,14 +507,124 @@ impl WebSocket {
     /// // Write from current task
     /// writer.send(Message::Text("Hello".into())).await?;
     /// ```
-    ///
-    /// Note: split() is only available for uncompressed WebSocket connections.
-    /// For compressed connections, use the async send/recv methods instead.
-    pub fn split(self) -> Option<(SplitReader<UpgradedStream>, SplitWriter<UpgradedStream>)> {
+    pub fn split(self) -> (WebSocketReader, WebSocketWriter) {
         match self.inner {
-            WebSocketInner::Plain(ws) => Some(ws.split()),
+            WebSocketInner::Plain(ws) => {
+                let (reader, writer) = ws.split();
+                (
+                    WebSocketReader {
+                        inner: WebSocketReaderInner::Plain(reader),
+                    },
+                    WebSocketWriter {
+                        inner: WebSocketWriterInner::Plain(writer),
+                    },
+                )
+            }
             #[cfg(feature = "permessage-deflate")]
-            WebSocketInner::Compressed(_) => None, // Compressed streams don't support split yet
+            WebSocketInner::Compressed(ws) => {
+                let (reader, writer) = ws.split();
+                (
+                    WebSocketReader {
+                        inner: WebSocketReaderInner::Compressed(reader),
+                    },
+                    WebSocketWriter {
+                        inner: WebSocketWriterInner::Compressed(writer),
+                    },
+                )
+            }
+        }
+    }
+}
+
+/// The read half of a split WebSocket connection
+///
+/// Created by calling `split()` on a `WebSocket`.
+pub struct WebSocketReader {
+    inner: WebSocketReaderInner,
+}
+
+enum WebSocketReaderInner {
+    Plain(SplitReader<UpgradedStream>),
+    #[cfg(feature = "permessage-deflate")]
+    Compressed(CompressedSplitReader<UpgradedStream>),
+}
+
+impl WebSocketReader {
+    /// Receive the next message
+    ///
+    /// Returns `None` when the connection is closed.
+    pub async fn next(&mut self) -> Option<Result<Message>> {
+        match &mut self.inner {
+            WebSocketReaderInner::Plain(reader) => reader.next().await,
+            #[cfg(feature = "permessage-deflate")]
+            WebSocketReaderInner::Compressed(reader) => reader.next().await,
+        }
+    }
+
+    /// Check if the connection is closed
+    pub fn is_closed(&self) -> bool {
+        match &self.inner {
+            WebSocketReaderInner::Plain(reader) => reader.is_closed(),
+            #[cfg(feature = "permessage-deflate")]
+            WebSocketReaderInner::Compressed(reader) => reader.is_closed(),
+        }
+    }
+}
+
+/// The write half of a split WebSocket connection
+///
+/// Created by calling `split()` on a `WebSocket`.
+pub struct WebSocketWriter {
+    inner: WebSocketWriterInner,
+}
+
+enum WebSocketWriterInner {
+    Plain(SplitWriter<UpgradedStream>),
+    #[cfg(feature = "permessage-deflate")]
+    Compressed(CompressedSplitWriter<UpgradedStream>),
+}
+
+impl WebSocketWriter {
+    /// Send a message
+    pub async fn send(&mut self, msg: Message) -> Result<()> {
+        match &mut self.inner {
+            WebSocketWriterInner::Plain(writer) => writer.send(msg).await,
+            #[cfg(feature = "permessage-deflate")]
+            WebSocketWriterInner::Compressed(writer) => writer.send(msg).await,
+        }
+    }
+
+    /// Send a text message
+    pub async fn send_text(&mut self, text: impl Into<String>) -> Result<()> {
+        self.send(Message::text(text)).await
+    }
+
+    /// Send a binary message
+    pub async fn send_binary(&mut self, data: bytes::Bytes) -> Result<()> {
+        self.send(Message::Binary(data)).await
+    }
+
+    /// Send a close frame
+    pub async fn close(&mut self, code: u16, reason: &str) -> Result<()> {
+        self.send(Message::Close(Some(CloseReason::new(code, reason))))
+            .await
+    }
+
+    /// Check if the connection is closed
+    pub fn is_closed(&self) -> bool {
+        match &self.inner {
+            WebSocketWriterInner::Plain(writer) => writer.is_closed(),
+            #[cfg(feature = "permessage-deflate")]
+            WebSocketWriterInner::Compressed(writer) => writer.is_closed(),
+        }
+    }
+
+    /// Flush any pending data
+    pub async fn flush(&mut self) -> Result<()> {
+        match &mut self.inner {
+            WebSocketWriterInner::Plain(writer) => writer.flush().await,
+            #[cfg(feature = "permessage-deflate")]
+            WebSocketWriterInner::Compressed(writer) => writer.flush().await,
         }
     }
 }

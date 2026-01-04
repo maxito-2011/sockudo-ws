@@ -833,6 +833,372 @@ impl CompressedProtocol {
     pub fn encode_close_response(&mut self, buf: &mut BytesMut) {
         self.inner.encode_close_response(buf);
     }
+
+    /// Split the compressed protocol into separate reader and writer halves
+    ///
+    /// This allows the encoder and decoder to be used independently for
+    /// concurrent read/write operations.
+    pub fn split(
+        self,
+        max_frame_size: usize,
+        max_message_size: usize,
+    ) -> (CompressedReaderProtocol, CompressedWriterProtocol) {
+        let role = self.inner.role;
+
+        // Create fresh reader protocol (decoder state)
+        let reader = CompressedReaderProtocol {
+            role,
+            parser: FrameParser::new(max_frame_size, role == Role::Server),
+            fragment_buf: self.inner.fragment_buf,
+            fragment_opcode: self.inner.fragment_opcode,
+            max_message_size,
+            decoder: self.deflate.decoder,
+            fragment_compressed: self.fragment_compressed,
+        };
+
+        // Create fresh writer protocol (encoder state)
+        let writer = CompressedWriterProtocol {
+            role,
+            encoder: self.deflate.encoder,
+        };
+
+        (reader, writer)
+    }
+}
+
+/// Reader half of a split compressed protocol
+///
+/// Contains the decoder and frame parser for reading compressed messages.
+#[cfg(feature = "permessage-deflate")]
+pub struct CompressedReaderProtocol {
+    /// Endpoint role
+    role: Role,
+    /// Frame parser
+    parser: FrameParser,
+    /// Fragment buffer for message reassembly
+    fragment_buf: BytesMut,
+    /// Opcode of current fragmented message
+    fragment_opcode: Option<OpCode>,
+    /// Maximum message size
+    max_message_size: usize,
+    /// Deflate decoder
+    decoder: crate::deflate::DeflateDecoder,
+    /// Whether the current fragmented message is compressed
+    fragment_compressed: bool,
+}
+
+#[cfg(feature = "permessage-deflate")]
+impl CompressedReaderProtocol {
+    /// Create a new reader protocol for server role
+    pub fn server(max_frame_size: usize, max_message_size: usize, config: &DeflateConfig) -> Self {
+        Self {
+            role: Role::Server,
+            parser: FrameParser::new(max_frame_size, true),
+            fragment_buf: BytesMut::new(),
+            fragment_opcode: None,
+            max_message_size,
+            decoder: crate::deflate::DeflateDecoder::new(
+                config.client_max_window_bits,
+                config.client_no_context_takeover,
+            ),
+            fragment_compressed: false,
+        }
+    }
+
+    /// Create a new reader protocol for client role
+    pub fn client(max_frame_size: usize, max_message_size: usize, config: &DeflateConfig) -> Self {
+        Self {
+            role: Role::Client,
+            parser: FrameParser::new(max_frame_size, false),
+            fragment_buf: BytesMut::new(),
+            fragment_opcode: None,
+            max_message_size,
+            decoder: crate::deflate::DeflateDecoder::new(
+                config.server_max_window_bits,
+                config.server_no_context_takeover,
+            ),
+            fragment_compressed: false,
+        }
+    }
+
+    /// Process incoming data and return complete messages
+    pub fn process(&mut self, buf: &mut BytesMut) -> Result<Vec<Message>> {
+        let mut messages = Vec::new();
+        self.process_into(buf, &mut messages)?;
+        Ok(messages)
+    }
+
+    /// Process incoming data into a reusable message buffer
+    pub fn process_into(&mut self, buf: &mut BytesMut, messages: &mut Vec<Message>) -> Result<()> {
+        messages.clear();
+
+        // Enable compression in parser
+        self.parser.set_compression(true);
+
+        while !buf.is_empty() {
+            match self.parser.parse(buf)? {
+                Some(frame) => {
+                    if let Some(msg) = self.handle_frame(frame)? {
+                        messages.push(msg);
+                    }
+                }
+                None => break,
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Handle a parsed frame with decompression support
+    fn handle_frame(&mut self, frame: Frame) -> Result<Option<Message>> {
+        let is_compressed = frame.header.rsv1;
+
+        match frame.header.opcode {
+            OpCode::Continuation => self.handle_continuation(frame),
+            OpCode::Text => self.handle_text(frame, is_compressed),
+            OpCode::Binary => self.handle_binary(frame, is_compressed),
+            OpCode::Close => self.handle_close(frame),
+            OpCode::Ping => Ok(Some(Message::Ping(frame.payload))),
+            OpCode::Pong => Ok(Some(Message::Pong(frame.payload))),
+        }
+    }
+
+    /// Handle text frame with potential decompression
+    fn handle_text(&mut self, frame: Frame, compressed: bool) -> Result<Option<Message>> {
+        if self.fragment_opcode.is_some() {
+            return Err(Error::Protocol("expected continuation frame"));
+        }
+
+        if frame.header.fin {
+            let payload = if compressed {
+                self.decoder
+                    .decompress(&frame.payload, self.max_message_size)?
+            } else {
+                frame.payload
+            };
+
+            if !validate_utf8(&payload) {
+                return Err(Error::InvalidUtf8);
+            }
+            Ok(Some(Message::Text(payload)))
+        } else {
+            self.fragment_compressed = compressed;
+            self.start_fragment(OpCode::Text, frame.payload)?;
+            Ok(None)
+        }
+    }
+
+    /// Handle binary frame with potential decompression
+    fn handle_binary(&mut self, frame: Frame, compressed: bool) -> Result<Option<Message>> {
+        if self.fragment_opcode.is_some() {
+            return Err(Error::Protocol("expected continuation frame"));
+        }
+
+        if frame.header.fin {
+            let payload = if compressed {
+                self.decoder
+                    .decompress(&frame.payload, self.max_message_size)?
+            } else {
+                frame.payload
+            };
+            Ok(Some(Message::Binary(payload)))
+        } else {
+            self.fragment_compressed = compressed;
+            self.start_fragment(OpCode::Binary, frame.payload)?;
+            Ok(None)
+        }
+    }
+
+    /// Handle continuation frame
+    fn handle_continuation(&mut self, frame: Frame) -> Result<Option<Message>> {
+        let opcode = self
+            .fragment_opcode
+            .ok_or(Error::Protocol("unexpected continuation frame"))?;
+
+        let new_size = self.fragment_buf.len() + frame.payload.len();
+        if new_size > self.max_message_size {
+            return Err(Error::MessageTooLarge);
+        }
+
+        self.fragment_buf.extend_from_slice(&frame.payload);
+
+        if frame.header.fin {
+            self.complete_fragment(opcode)
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Start a fragmented message
+    fn start_fragment(&mut self, opcode: OpCode, payload: Bytes) -> Result<()> {
+        if payload.len() > self.max_message_size {
+            return Err(Error::MessageTooLarge);
+        }
+
+        self.fragment_opcode = Some(opcode);
+        self.fragment_buf.clear();
+        self.fragment_buf.extend_from_slice(&payload);
+        Ok(())
+    }
+
+    /// Complete a fragmented message with decompression if needed
+    fn complete_fragment(&mut self, opcode: OpCode) -> Result<Option<Message>> {
+        self.fragment_opcode = None;
+        let compressed_data = self.fragment_buf.split().freeze();
+
+        let data = if self.fragment_compressed {
+            self.fragment_compressed = false;
+            self.decoder
+                .decompress(&compressed_data, self.max_message_size)?
+        } else {
+            compressed_data
+        };
+
+        match opcode {
+            OpCode::Text => {
+                if !validate_utf8(&data) {
+                    return Err(Error::InvalidUtf8);
+                }
+                Ok(Some(Message::Text(data)))
+            }
+            OpCode::Binary => Ok(Some(Message::Binary(data))),
+            _ => Err(Error::Protocol("invalid fragment opcode")),
+        }
+    }
+
+    /// Handle close frame
+    fn handle_close(&mut self, frame: Frame) -> Result<Option<Message>> {
+        let reason = if frame.payload.len() >= 2 {
+            let code = u16::from_be_bytes([frame.payload[0], frame.payload[1]]);
+
+            if !CloseReason::is_valid_code(code) && !(3000..=4999).contains(&code) {
+                return Err(Error::InvalidCloseCode(code));
+            }
+
+            let reason_text = if frame.payload.len() > 2 {
+                let text = &frame.payload[2..];
+                if !validate_utf8(text) {
+                    return Err(Error::InvalidUtf8);
+                }
+                String::from_utf8_lossy(text).into_owned()
+            } else {
+                String::new()
+            };
+
+            Some(CloseReason::new(code, reason_text))
+        } else if frame.payload.is_empty() {
+            None
+        } else {
+            return Err(Error::Protocol("invalid close frame payload"));
+        };
+
+        Ok(Some(Message::Close(reason)))
+    }
+}
+
+/// Writer half of a split compressed protocol
+///
+/// Contains the encoder for writing compressed messages.
+#[cfg(feature = "permessage-deflate")]
+pub struct CompressedWriterProtocol {
+    /// Endpoint role
+    role: Role,
+    /// Deflate encoder
+    encoder: crate::deflate::DeflateEncoder,
+}
+
+#[cfg(feature = "permessage-deflate")]
+impl CompressedWriterProtocol {
+    /// Create a new writer protocol for server role
+    pub fn server(config: &DeflateConfig) -> Self {
+        Self {
+            role: Role::Server,
+            encoder: crate::deflate::DeflateEncoder::new(
+                config.server_max_window_bits,
+                config.server_no_context_takeover,
+                config.compression_level,
+                config.compression_threshold,
+            ),
+        }
+    }
+
+    /// Create a new writer protocol for client role
+    pub fn client(config: &DeflateConfig) -> Self {
+        Self {
+            role: Role::Client,
+            encoder: crate::deflate::DeflateEncoder::new(
+                config.client_max_window_bits,
+                config.client_no_context_takeover,
+                config.compression_level,
+                config.compression_threshold,
+            ),
+        }
+    }
+
+    /// Encode a message for sending with compression
+    pub fn encode_message(&mut self, msg: &Message, buf: &mut BytesMut) -> Result<()> {
+        let mask = if self.role == Role::Client {
+            Some(crate::mask::generate_mask_fast())
+        } else {
+            None
+        };
+
+        match msg {
+            Message::Text(b) => {
+                if let Some(compressed) = self.encoder.compress(b)? {
+                    encode_frame_with_rsv(buf, OpCode::Text, &compressed, true, mask, true);
+                } else {
+                    encode_frame(buf, OpCode::Text, b, true, mask);
+                }
+            }
+            Message::Binary(b) => {
+                if let Some(compressed) = self.encoder.compress(b)? {
+                    encode_frame_with_rsv(buf, OpCode::Binary, &compressed, true, mask, true);
+                } else {
+                    encode_frame(buf, OpCode::Binary, b, true, mask);
+                }
+            }
+            Message::Ping(b) => {
+                encode_frame(buf, OpCode::Ping, b, true, mask);
+            }
+            Message::Pong(b) => {
+                encode_frame(buf, OpCode::Pong, b, true, mask);
+            }
+            Message::Close(reason) => {
+                let payload = if let Some(r) = reason {
+                    let mut p = BytesMut::with_capacity(2 + r.reason.len());
+                    p.extend_from_slice(&r.code.to_be_bytes());
+                    p.extend_from_slice(r.reason.as_bytes());
+                    p.freeze()
+                } else {
+                    Bytes::new()
+                };
+                encode_frame(buf, OpCode::Close, &payload, true, mask);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Encode a pong response for a ping
+    pub fn encode_pong(&mut self, ping_data: &[u8], buf: &mut BytesMut) {
+        let mask = if self.role == Role::Client {
+            Some(crate::mask::generate_mask_fast())
+        } else {
+            None
+        };
+        encode_frame(buf, OpCode::Pong, ping_data, true, mask);
+    }
+
+    /// Encode a close response
+    pub fn encode_close_response(&mut self, buf: &mut BytesMut) {
+        let mask = if self.role == Role::Client {
+            Some(crate::mask::generate_mask_fast())
+        } else {
+            None
+        };
+        encode_frame(buf, OpCode::Close, &[], true, mask);
+    }
 }
 
 #[cfg(test)]

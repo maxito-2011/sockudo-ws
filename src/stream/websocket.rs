@@ -1214,6 +1214,286 @@ where
     }
 }
 
+// ============================================================================
+// Compressed Split Reader/Writer (permessage-deflate)
+// ============================================================================
+
+/// The read half of a split compressed WebSocket stream
+///
+/// Created by calling `split()` on a `CompressedWebSocketStream`.
+/// This half owns the read side of the TCP stream and can operate
+/// completely independently from the write half.
+#[cfg(feature = "permessage-deflate")]
+pub struct CompressedSplitReader<S> {
+    /// Read half of the underlying stream
+    reader: ReadHalf<S>,
+    /// Protocol for decoding with decompression
+    protocol: crate::protocol::CompressedReaderProtocol,
+    /// Read buffer
+    read_buf: BytesMut,
+    /// Pending messages from last decode
+    pending_messages: Vec<Message>,
+    pending_index: usize,
+    /// Channel to send control frame requests to writer
+    control_tx: mpsc::UnboundedSender<ControlRequest>,
+    /// Connection state
+    closed: bool,
+}
+
+/// The write half of a split compressed WebSocket stream
+///
+/// Created by calling `split()` on a `CompressedWebSocketStream`.
+/// This half owns the write side of the TCP stream and can operate
+/// completely independently from the read half.
+#[cfg(feature = "permessage-deflate")]
+pub struct CompressedSplitWriter<S> {
+    /// Write half of the underlying stream
+    writer: WriteHalf<S>,
+    /// Protocol for encoding with compression
+    protocol: crate::protocol::CompressedWriterProtocol,
+    /// Write buffer for encoding
+    write_buf: BytesMut,
+    /// Channel to receive control frame requests from reader
+    control_rx: mpsc::UnboundedReceiver<ControlRequest>,
+    /// Connection state
+    closed: bool,
+}
+
+#[cfg(feature = "permessage-deflate")]
+impl<S> CompressedWebSocketStream<S>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    /// Split the compressed WebSocket stream into separate read and write halves
+    ///
+    /// This allows TRUE concurrent reading and writing from different tasks
+    /// with ZERO lock contention. The underlying TCP stream is split at the
+    /// OS level for maximum performance.
+    ///
+    /// Both halves maintain compression/decompression state independently:
+    /// - Reader has the decoder for decompressing incoming messages
+    /// - Writer has the encoder for compressing outgoing messages
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let (mut reader, mut writer) = compressed_ws.split();
+    ///
+    /// // Read in one task - NEVER blocks writer
+    /// tokio::spawn(async move {
+    ///     while let Some(msg) = reader.next().await {
+    ///         println!("Got: {:?}", msg);
+    ///     }
+    /// });
+    ///
+    /// // Write in another - NEVER blocks reader
+    /// writer.send(Message::Text("Hello".into())).await?;
+    /// ```
+    pub fn split(self) -> (CompressedSplitReader<S>, CompressedSplitWriter<S>) {
+        // Split the underlying transport at the OS level
+        let (reader, writer) = tokio::io::split(self.inner);
+
+        // Create channel for control frame coordination
+        let (control_tx, control_rx) = mpsc::unbounded_channel();
+
+        // Split the protocol into reader and writer halves
+        let (reader_protocol, writer_protocol) = self
+            .protocol
+            .split(self.config.max_frame_size, self.config.max_message_size);
+
+        (
+            CompressedSplitReader {
+                reader,
+                protocol: reader_protocol,
+                read_buf: self.read_buf,
+                pending_messages: self.pending_messages,
+                pending_index: self.pending_index,
+                control_tx,
+                closed: self.state == StreamState::Closed,
+            },
+            CompressedSplitWriter {
+                writer,
+                protocol: writer_protocol,
+                write_buf: BytesMut::with_capacity(1024),
+                control_rx,
+                closed: self.state == StreamState::Closed,
+            },
+        )
+    }
+}
+
+#[cfg(feature = "permessage-deflate")]
+impl<S> CompressedSplitReader<S>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    /// Receive the next message
+    ///
+    /// Returns `None` when the connection is closed.
+    /// This method NEVER blocks the writer - true concurrent I/O!
+    pub async fn next(&mut self) -> Option<Result<Message>> {
+        loop {
+            // Check for connection closed
+            if self.closed {
+                return None;
+            }
+
+            // Return any pending messages first
+            if self.pending_index < self.pending_messages.len() {
+                let msg = self.pending_messages[self.pending_index].clone();
+                self.pending_index += 1;
+
+                if self.pending_index >= self.pending_messages.len() {
+                    self.pending_messages.clear();
+                    self.pending_index = 0;
+                }
+
+                // Handle control frames - send requests to writer via channel
+                match &msg {
+                    Message::Ping(data) => {
+                        // Request writer to send pong (non-blocking!)
+                        let _ = self.control_tx.send(ControlRequest::Pong(data.clone()));
+                        // Continue to next message (user doesn't see Ping)
+                        continue;
+                    }
+                    Message::Close(reason) => {
+                        if !self.closed {
+                            // Request writer to send close response
+                            let _ = self.control_tx.send(ControlRequest::CloseResponse);
+                            self.closed = true;
+                        }
+                        return Some(Ok(Message::Close(reason.clone())));
+                    }
+                    Message::Pong(_) => {
+                        // User doesn't typically need to see Pong
+                        continue;
+                    }
+                    _ => {}
+                }
+
+                return Some(Ok(msg));
+            }
+
+            // Need to read more data - NO LOCK HERE!
+            // Reserve space if needed
+            if self.read_buf.capacity() - self.read_buf.len() < 4096 {
+                self.read_buf.reserve(8192);
+            }
+
+            match self.reader.read_buf(&mut self.read_buf).await {
+                Ok(0) => {
+                    // EOF - connection closed
+                    self.closed = true;
+                    return None;
+                }
+                Ok(_n) => {
+                    // Process the new data
+                    match self.protocol.process(&mut self.read_buf) {
+                        Ok(messages) => {
+                            if !messages.is_empty() {
+                                self.pending_messages = messages;
+                                self.pending_index = 0;
+                            }
+                        }
+                        Err(e) => return Some(Err(e)),
+                    }
+                    // Continue loop to check for messages
+                }
+                Err(e) => {
+                    return Some(Err(e.into()));
+                }
+            }
+        }
+    }
+
+    /// Check if the connection is closed
+    pub fn is_closed(&self) -> bool {
+        self.closed
+    }
+}
+
+#[cfg(feature = "permessage-deflate")]
+impl<S> CompressedSplitWriter<S>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    /// Send a message
+    ///
+    /// This method NEVER blocks the reader - true concurrent I/O!
+    pub async fn send(&mut self, msg: Message) -> Result<()> {
+        if self.closed {
+            return Err(Error::ConnectionClosed);
+        }
+
+        // Process any pending control frame requests from reader first
+        self.process_control_requests().await?;
+
+        if msg.is_close() {
+            self.closed = true;
+        }
+
+        // Encode message with compression - NO LOCK HERE!
+        self.write_buf.clear();
+        self.protocol.encode_message(&msg, &mut self.write_buf)?;
+
+        // Write to the underlying stream - NO LOCK HERE!
+        self.writer.write_all(&self.write_buf).await?;
+        self.writer.flush().await?;
+        Ok(())
+    }
+
+    /// Process control frame requests from the reader
+    async fn process_control_requests(&mut self) -> Result<()> {
+        // Drain all pending control requests
+        while let Ok(req) = self.control_rx.try_recv() {
+            self.write_buf.clear();
+
+            match req {
+                ControlRequest::Pong(data) => {
+                    self.protocol.encode_pong(&data, &mut self.write_buf);
+                }
+                ControlRequest::CloseResponse => {
+                    self.protocol.encode_close_response(&mut self.write_buf);
+                    self.closed = true;
+                }
+            }
+
+            if !self.write_buf.is_empty() {
+                self.writer.write_all(&self.write_buf).await?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Send a text message
+    pub async fn send_text(&mut self, text: impl Into<String>) -> Result<()> {
+        self.send(Message::text(text)).await
+    }
+
+    /// Send a binary message
+    pub async fn send_binary(&mut self, data: bytes::Bytes) -> Result<()> {
+        self.send(Message::Binary(data)).await
+    }
+
+    /// Send a close frame
+    pub async fn close(&mut self, code: u16, reason: &str) -> Result<()> {
+        self.send(Message::Close(Some(CloseReason::new(code, reason))))
+            .await
+    }
+
+    /// Check if the connection is closed
+    pub fn is_closed(&self) -> bool {
+        self.closed
+    }
+
+    /// Flush any pending control responses
+    pub async fn flush(&mut self) -> Result<()> {
+        self.process_control_requests().await?;
+        self.writer.flush().await.map_err(Into::into)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
